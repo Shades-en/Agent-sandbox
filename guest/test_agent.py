@@ -1,8 +1,15 @@
 import unittest
 
-from agent import cap_text, decode_frame, encode_frame, run_command
-
-MAX_STREAM = 256 * 1024
+from agent import (
+    MAX_FRAME,
+    MAX_STREAM,
+    cap_text,
+    decode_frame,
+    encode_frame,
+    fit_response_to_frame,
+    normalize_exit_code,
+    run_command,
+)
 
 
 class AgentTest(unittest.TestCase):
@@ -25,6 +32,35 @@ class AgentTest(unittest.TestCase):
     def test_run_command_false(self):
         result = run_command("false")
         self.assertNotEqual(result["exitCode"], 0)
+
+    def test_response_frame_fits_heavy_json_escaping(self):
+        chunk = '"' * MAX_STREAM
+        import json
+
+        raw = {
+            "stdout": chunk,
+            "stderr": chunk,
+            "exitCode": 0,
+            "truncated": False,
+        }
+        body = json.dumps(raw, ensure_ascii=False).encode("utf-8")
+        self.assertGreater(len(body), MAX_FRAME)
+        fitted = fit_response_to_frame(raw)
+        frame = encode_frame(fitted)
+        self.assertLessEqual(len(frame) - 4, MAX_FRAME)
+        self.assertTrue(fitted["truncated"])
+
+    def test_normalize_exit_signal_nine(self):
+        self.assertEqual(normalize_exit_code(-9), 137)
+
+    def test_run_command_large_stdout_truncates(self):
+        result = run_command("python3 -c \"import sys; sys.stdout.write('a' * (256 * 1024 + 1))\"")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")), MAX_STREAM)
+        self.assertGreaterEqual(result["exitCode"], 0)
+        self.assertLessEqual(result["exitCode"], 255)
+        frame = encode_frame(result)
+        self.assertLessEqual(len(frame) - 4, MAX_FRAME)
 
 
 if __name__ == "__main__":
