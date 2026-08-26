@@ -4,6 +4,7 @@
 import json
 import os
 import select
+import signal
 import socket
 import struct
 import subprocess
@@ -69,6 +70,18 @@ def cap_text(text: str) -> tuple[str, bool]:
     return raw[:MAX_STREAM].decode("utf-8", errors="ignore"), True
 
 
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
+
 def _append_limited(buf: bytearray, chunk: bytes, limit: int) -> tuple[bool, bool]:
     """Append chunk up to limit. Returns (added_any, hit_limit)."""
     if len(buf) >= limit:
@@ -122,7 +135,7 @@ def _read_capped_output(proc: subprocess.Popen) -> tuple[bytes, bytes, bool]:
                         truncated = True
 
         if truncated and proc.poll() is None:
-            proc.kill()
+            _kill_process_group(proc)
 
         if proc.poll() is not None:
             for fd, buf in ((stdout_fd, stdout_buf), (stderr_fd, stderr_buf)):
@@ -142,7 +155,7 @@ def _read_capped_output(proc: subprocess.Popen) -> tuple[bytes, bytes, bool]:
                     if hit:
                         truncated = True
             if truncated and proc.poll() is None:
-                proc.kill()
+                _kill_process_group(proc)
             break
 
     proc.wait()
@@ -160,6 +173,7 @@ def run_command(command: str) -> dict:
         env={"PATH": GUEST_PATH},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        start_new_session=True,
     )
     raw_out, raw_err, truncated = _read_capped_output(proc)
     stdout, out_cut = cap_text(raw_out.decode("utf-8", errors="replace"))

@@ -1,3 +1,4 @@
+import signal
 import unittest
 
 from agent import (
@@ -61,6 +62,26 @@ class AgentTest(unittest.TestCase):
         self.assertLessEqual(result["exitCode"], 255)
         frame = encode_frame(result)
         self.assertLessEqual(len(frame) - 4, MAX_FRAME)
+
+    def test_run_command_pipeline_group_kill(self):
+        cmd = (
+            "python3 -c 'import sys\nwhile True:\n sys.stdout.buffer.write(b\"x\"*4096)' | cat"
+        )
+        def on_alarm(_signum, _frame):
+            raise TimeoutError("run_command hung")
+
+        old_handler = signal.signal(signal.SIGALRM, on_alarm)
+        signal.alarm(5)
+        try:
+            result = run_command(cmd)
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["stdout"].encode("utf-8")), MAX_STREAM)
+        self.assertGreaterEqual(result["exitCode"], 0)
+        self.assertLessEqual(result["exitCode"], 255)
 
 
 if __name__ == "__main__":
