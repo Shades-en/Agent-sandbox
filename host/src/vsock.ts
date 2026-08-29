@@ -35,10 +35,6 @@ function stashLeftover(socket: net.Socket, extra: Buffer): void {
   }
 }
 
-function peekLeftover(socket: net.Socket): Buffer {
-  return readLeftovers.get(socket) ?? Buffer.alloc(0);
-}
-
 function readExact(socket: net.Socket, n: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -126,12 +122,10 @@ export async function connectAndExchange(
 ): Promise<ExecResponse> {
   const socket = await connectGuest(udsPath, Date.now() + BOOT_TIMEOUT_MS);
   try {
-    if (peekLeftover(socket).length === 0) {
-      const frame = encodeFrame({ command });
-      await new Promise<void>((resolve, reject) => {
-        socket.write(frame, (error) => (error ? reject(error) : resolve()));
-      });
-    }
+    const frame = encodeFrame({ command });
+    await new Promise<void>((resolve, reject) => {
+      socket.write(frame, (error) => (error ? reject(error) : resolve()));
+    });
     const header = await readExact(socket, 4, commandTimeoutMs);
     const length = header.readUInt32BE(0);
     const body = await readExact(socket, length, commandTimeoutMs);

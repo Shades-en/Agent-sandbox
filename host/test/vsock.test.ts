@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { encodeFrame } from "../src/frame.js";
+import { VSOCK_PORT } from "../src/constants.js";
+import { decodeFrame, encodeFrame } from "../src/frame.js";
 import { connectAndExchange, parseConnectAck } from "../src/vsock.js";
 
 describe("vsock handshake", () => {
@@ -19,17 +20,32 @@ describe("vsock handshake", () => {
   it("connects, reads the ack, and returns the guest frame", async () => {
     const sockPath = path.join(os.tmpdir(), `vsock-test-${process.pid}.sock`);
     const server = net.createServer((socket) => {
-      let buf = "";
-      socket.on("data", (chunk) => {
-        buf += chunk.toString("utf8");
-        if (!buf.includes("\n")) return;
-        socket.write("OK 5000\n");
-        socket.end(encodeFrame({
-          stdout: "hello\n",
-          stderr: "",
-          exitCode: 0,
-          truncated: false,
-        }));
+      let buf = Buffer.alloc(0);
+      let connectDone = false;
+      socket.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (!connectDone) {
+          const nl = buf.indexOf(0x0a);
+          if (nl === -1) return;
+          const line = buf.subarray(0, nl).toString("utf8");
+          assert.equal(line, `CONNECT ${VSOCK_PORT}`);
+          buf = buf.subarray(nl + 1);
+          socket.write(`OK ${VSOCK_PORT}\n`);
+          connectDone = true;
+        }
+        if (buf.length < 4) return;
+        const length = buf.readUInt32BE(0);
+        if (buf.length < 4 + length) return;
+        const payload = decodeFrame(buf.subarray(0, 4 + length));
+        assert.deepEqual(payload, { command: "echo hello" });
+        socket.end(
+          encodeFrame({
+            stdout: "hello\n",
+            stderr: "",
+            exitCode: 0,
+            truncated: false,
+          }),
+        );
       });
     });
     await new Promise<void>((resolve) => server.listen(sockPath, resolve));
