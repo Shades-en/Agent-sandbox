@@ -1,7 +1,8 @@
 import net from "node:net";
 
-import { BOOT_TIMEOUT_MS, VSOCK_PORT } from "./constants.js";
+import { BOOT_TIMEOUT_MS, MAX_FRAME_BYTES, VSOCK_PORT } from "./constants.js";
 import {
+  FrameError,
   decodeFrame,
   encodeFrame,
   parseExecResponse,
@@ -37,6 +38,11 @@ function stashLeftover(socket: net.Socket, extra: Buffer): void {
 
 function readExact(socket: net.Socket, n: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    if (timeoutMs <= 0) {
+      reject(new CommandTimeoutError());
+      return;
+    }
+    socket.resume();
     const chunks: Buffer[] = [];
     let got = 0;
     const timer = setTimeout(() => {
@@ -68,6 +74,7 @@ function readExact(socket: net.Socket, n: number, timeoutMs: number): Promise<Bu
       socket.off("data", onData);
       socket.off("error", onError);
       socket.off("close", onClose);
+      socket.pause();
     };
     socket.on("data", onData);
     socket.on("error", onError);
@@ -80,9 +87,10 @@ function readExact(socket: net.Socket, n: number, timeoutMs: number): Promise<Bu
 }
 
 async function readLine(socket: net.Socket, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
   let buf = Buffer.alloc(0);
   while (!buf.includes(0x0a)) {
-    const next = await readExact(socket, 1, timeoutMs);
+    const next = await readExact(socket, 1, deadline - Date.now());
     buf = Buffer.concat([buf, next]);
   }
   return buf.toString("utf8").replace(/\n$/, "");
@@ -91,7 +99,10 @@ async function readLine(socket: net.Socket, timeoutMs: number): Promise<string> 
 function connectOnce(udsPath: string): Promise<net.Socket> {
   return new Promise((resolve, reject) => {
     const socket = net.connect(udsPath);
-    socket.once("connect", () => resolve(socket));
+    socket.once("connect", () => {
+      socket.pause();
+      resolve(socket);
+    });
     socket.once("error", reject);
   });
 }
@@ -126,9 +137,13 @@ export async function connectAndExchange(
     await new Promise<void>((resolve, reject) => {
       socket.write(frame, (error) => (error ? reject(error) : resolve()));
     });
-    const header = await readExact(socket, 4, commandTimeoutMs);
+    const responseDeadline = Date.now() + commandTimeoutMs;
+    const header = await readExact(socket, 4, responseDeadline - Date.now());
     const length = header.readUInt32BE(0);
-    const body = await readExact(socket, length, commandTimeoutMs);
+    if (length > MAX_FRAME_BYTES) {
+      throw new FrameError("frame too large");
+    }
+    const body = await readExact(socket, length, responseDeadline - Date.now());
     return parseExecResponse(decodeFrame(Buffer.concat([header, body])));
   } finally {
     socket.destroy();
