@@ -66,6 +66,27 @@ describe("firecracker api", () => {
     }
   });
 
+  it("PUT rejects when the server never ends the response", async () => {
+    const sock = path.join(os.tmpdir(), `fc-api-hang-${process.pid}.sock`);
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200);
+      res.write("partial");
+    });
+    await new Promise<void>((resolve) => server.listen(sock, resolve));
+    try {
+      await assert.rejects(
+        () => putJson(sock, "/machine-config", { vcpu_count: 1 }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.match(err.message, /\/machine-config/);
+          return true;
+        },
+      );
+    } finally {
+      server.close();
+    }
+  });
+
   it("configureAndStart throws ApiError when a call is not 204", async () => {
     const sock = path.join(os.tmpdir(), `fc-api-bad-${process.pid}.sock`);
     const server = http.createServer((_req, res) => {

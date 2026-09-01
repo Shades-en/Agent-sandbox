@@ -58,6 +58,8 @@ export function firecrackerArgs(apiSock: string, logPath: string): string[] {
   return ["--api-sock", apiSock, "--log-path", logPath];
 }
 
+const PUT_RESPONSE_TIMEOUT_MS = 5_000;
+
 export function putJson(
   socketPath: string,
   urlPath: string,
@@ -65,7 +67,27 @@ export function putJson(
 ): Promise<{ status: number; body: string }> {
   const payload = JSON.stringify(body);
   return new Promise((resolve, reject) => {
-    const req = http.request(
+    let settled = false;
+    let responseTimeout: NodeJS.Timeout | undefined;
+
+    const finish = (result: { status: number; body: string }) => {
+      if (settled) return;
+      settled = true;
+      if (responseTimeout !== undefined) clearTimeout(responseTimeout);
+      resolve(result);
+    };
+
+    let req: http.ClientRequest;
+
+    const fail = (message: string) => {
+      if (settled) return;
+      settled = true;
+      if (responseTimeout !== undefined) clearTimeout(responseTimeout);
+      req.destroy();
+      reject(new Error(message));
+    };
+
+    req = http.request(
       {
         socketPath,
         path: urlPath,
@@ -78,16 +100,24 @@ export function putJson(
       },
       (res) => {
         const chunks: Buffer[] = [];
+        responseTimeout = setTimeout(() => {
+          fail(`API PUT ${urlPath} timed out after ${PUT_RESPONSE_TIMEOUT_MS}ms waiting for response end`);
+        }, PUT_RESPONSE_TIMEOUT_MS);
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("error", (err) => {
+          fail(`API PUT ${urlPath} response error: ${err.message}`);
+        });
         res.on("end", () => {
-          resolve({
+          finish({
             status: res.statusCode ?? 0,
             body: Buffer.concat(chunks).toString("utf8"),
           });
         });
       },
     );
-    req.on("error", reject);
+    req.on("error", (err) => {
+      fail(`API PUT ${urlPath} request error: ${err.message}`);
+    });
     req.end(payload);
   });
 }
