@@ -5,7 +5,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsc -p tsconfig.json && node --test dist/test/frame.test.js dist/test/vsock.test.js dist/test/firecracker.test.js"
+    "test": "tsc -p tsconfig.json && node --test dist/test/frame.test.js dist/test/vsock.test.js dist/test/firecracker.test.js dist/test/exec.test.js"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
