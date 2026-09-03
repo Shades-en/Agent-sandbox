@@ -22,6 +22,7 @@ export interface ExecResult {
 
 export interface FirecrackerHandle {
   kill: () => void;
+  ready: Promise<void>;
 }
 
 export interface ExecEnv {
@@ -78,7 +79,16 @@ function spawnFirecracker(args: {
     firecrackerArgs(args.apiSock, args.logPath),
     { stdio: ["ignore", serial, serial] },
   );
-  return { kill: () => child.kill("SIGKILL") };
+  const ready = new Promise<void>((resolve, reject) => {
+    child.once("spawn", () => resolve());
+    child.once("error", (err) => {
+      reject(new Error(`failed to spawn ${args.bin}: ${err.message}`));
+    });
+  });
+  return {
+    kill: () => child.kill("SIGKILL"),
+    ready,
+  };
 }
 
 export function defaultEnv(): ExecEnv {
@@ -123,6 +133,7 @@ export async function execCommand(
     serialPath,
   });
   try {
+    await child.ready;
     await env.waitForApi(apiSock, Date.now() + BOOT_TIMEOUT_MS);
     await env.configure(apiSock, {
       kernelPath: env.kernelPath,

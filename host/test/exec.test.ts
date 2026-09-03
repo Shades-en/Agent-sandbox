@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, it } from "node:test";
 
 import { CommandTimeoutError } from "../src/vsock.js";
-import { execCommand } from "../src/exec.js";
+import { defaultEnv, execCommand } from "../src/exec.js";
 
 describe("execCommand", () => {
   it("copies the rootfs, configures, exchanges one command, and kills the process", async () => {
@@ -18,7 +21,7 @@ describe("execCommand", () => {
       },
       spawn() {
         calls.push("spawn");
-        return { kill() { killed = true; } };
+        return { kill() { killed = true; }, ready: Promise.resolve() };
       },
       async waitForApi() {
         calls.push("wait");
@@ -53,7 +56,7 @@ describe("execCommand", () => {
       firecrackerBin: "/bin/firecracker",
       async copy() {},
       spawn() {
-        return { kill() { killed = true; } };
+        return { kill() { killed = true; }, ready: Promise.resolve() };
       },
       async waitForApi() {},
       async configure() {},
@@ -65,6 +68,48 @@ describe("execCommand", () => {
     assert.equal(result.exitCode, 124);
     assert.equal(result.stderr, "timeout\n");
     assert.equal(result.stdout, "");
+    assert.equal(killed, true);
+  });
+
+  it("rejects when spawn fails and still kills the process", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "exec-spawn-err-"));
+    const missingBin = path.join(home, "missing-firecracker");
+    let killed = false;
+    const realSpawn = defaultEnv().spawn;
+    await assert.rejects(
+      () => execCommand("echo", 10, {
+        home,
+        kernelPath: "/k",
+        rootfsBase: "/r",
+        firecrackerBin: missingBin,
+        async copy() {},
+        spawn(args) {
+          const handle = realSpawn(args);
+          const kill = handle.kill.bind(handle);
+          return {
+            ready: handle.ready,
+            kill() {
+              killed = true;
+              kill();
+            },
+          };
+        },
+        async waitForApi() {
+          throw new Error("waitForApi should not run");
+        },
+        async configure() {
+          throw new Error("configure should not run");
+        },
+        async exchange() {
+          throw new Error("exchange should not run");
+        },
+        log() {},
+      }),
+      (error: Error) => {
+        assert.match(error.message, new RegExp(`failed to spawn ${missingBin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+        return true;
+      },
+    );
     assert.equal(killed, true);
   });
 });
