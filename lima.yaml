@@ -1,0 +1,10 @@
+base:
+  - template:ubuntu
+
+vmType: vz
+nestedVirtualization: true
+cpus: 4
+memory: 4GiB
+mounts:
+  - location: "~"
+    writable: true
