@@ -52,10 +52,12 @@ KERNEL_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ke
 ROOTFS_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["rootfs"])' "$MANIFEST")
 
 if [[ ! -f "${IMG}/vmlinux" ]]; then
-  curl -fsSL -o "${IMG}/vmlinux" "$KERNEL_URL"
+  curl -fsSL -o "${IMG}/vmlinux.tmp" "$KERNEL_URL"
+  mv "${IMG}/vmlinux.tmp" "${IMG}/vmlinux"
 fi
 if [[ ! -f "${IMG}/ubuntu.squashfs" ]]; then
-  curl -fsSL -o "${IMG}/ubuntu.squashfs" "$ROOTFS_URL"
+  curl -fsSL -o "${IMG}/ubuntu.squashfs.tmp" "$ROOTFS_URL"
+  mv "${IMG}/ubuntu.squashfs.tmp" "${IMG}/ubuntu.squashfs"
 fi
 
 rm -rf "${WORK}/squashfs-root"
