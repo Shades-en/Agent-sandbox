@@ -112,9 +112,22 @@ async function connectGuest(udsPath: string, deadline: number): Promise<net.Sock
   while (Date.now() < deadline) {
     let socket: net.Socket | undefined;
     try {
-      socket = await connectOnce(udsPath);
-      socket.write(`CONNECT ${VSOCK_PORT}\n`);
-      const line = await readLine(socket, deadline - Date.now());
+      const connected = await connectOnce(udsPath);
+      socket = connected;
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error | null) => {
+          if (settled) return;
+          settled = true;
+          connected.off("error", onError);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onError = (error: Error) => finish(error);
+        connected.once("error", onError);
+        connected.write(`CONNECT ${VSOCK_PORT}\n`, (error) => finish(error));
+      });
+      const line = await readLine(connected, deadline - Date.now());
       parseConnectAck(line);
       return socket;
     } catch (error) {
@@ -122,6 +135,9 @@ async function connectGuest(udsPath: string, deadline: number): Promise<net.Sock
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
+  }
+  if (lastError instanceof CommandTimeoutError) {
+    throw new Error(`no vsock CONNECT within ${BOOT_TIMEOUT_MS}ms`);
   }
   throw lastError instanceof Error ? lastError : new Error("vsock connect failed");
 }

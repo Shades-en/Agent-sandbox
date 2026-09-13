@@ -43,4 +43,22 @@ describe("bash tool", () => {
       /kvm/,
     );
   });
+
+  it("returns a guest exit 124 as data", () => {
+    assert.deepEqual(
+      interpretControllerResult({ stdout: "nope\n", stderr: "still running\n", exitCode: 124 }),
+      { stdout: "nope\n", stderr: "still running\n", exitCode: 124 },
+    );
+  });
+
+  it("rejects a limactl failure", () => {
+    assert.throws(
+      () => interpretControllerResult({
+        stdout: "",
+        stderr: "FATA[0000] instance fc is stopped\n",
+        exitCode: 1,
+      }),
+      /stopped/,
+    );
+  });
 });

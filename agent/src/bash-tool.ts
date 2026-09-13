@@ -28,6 +28,9 @@ export function interpretControllerResult(result: ControllerResult): ControllerR
   if (result.stderr.startsWith("sandbox:")) {
     throw new Error(result.stderr);
   }
+  if (/^(?:FATA|ERRO)\[/m.test(result.stderr)) {
+    throw new Error(result.stderr);
+  }
   return result;
 }
 

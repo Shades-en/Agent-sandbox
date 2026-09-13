@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import fs from "node:fs";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -69,6 +70,58 @@ describe("execCommand", () => {
     assert.equal(result.stderr, "timeout\n");
     assert.equal(result.stdout, "");
     assert.equal(killed, true);
+  });
+
+  it("rejects a failed boot instead of returning a command timeout", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "exec-boot-"));
+    await assert.rejects(
+      () => execCommand("echo", 10, {
+        home,
+        kernelPath: "/k",
+        rootfsBase: "/r",
+        firecrackerBin: "/bin/firecracker",
+        async copy() {},
+        spawn() {
+          return { kill() {}, ready: Promise.resolve() };
+        },
+        async waitForApi() {},
+        async configure() {},
+        async exchange() {
+          throw new Error("no vsock CONNECT within 15000ms");
+        },
+        log() {},
+      }),
+      (error: Error) => {
+        assert.match(error.message, /no vsock CONNECT within 15000ms/);
+        assert.match(error.message, /serial log:/);
+        return true;
+      },
+    );
+  });
+
+  it("records a reflink refusal beside the run, not on stderr", async () => {
+    const home = await mkdtemp(path.join(os.tmpdir(), "exec-copy-"));
+    const base = path.join(home, "base");
+    const dest = path.join(home, "run", "rootfs.ext4");
+    await mkdir(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(base, "image");
+    const written: string[] = [];
+    const original = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      await defaultEnv().copy(base, dest);
+    } finally {
+      process.stderr.write = original;
+    }
+    assert.equal(fs.readFileSync(dest, "utf8"), "image");
+    assert.deepEqual(written, []);
+    const note = path.join(home, "run", "controller.log");
+    if (fs.existsSync(note)) {
+      assert.match(fs.readFileSync(note, "utf8"), /reflink refused/);
+    }
   });
 
   it("rejects when spawn fails and still kills the process", async () => {

@@ -14,7 +14,10 @@ MANIFEST="${BASE}/manifest.json"
 
 mkdir -p "$IMG" "$BIN" "$WORK"
 sudo apt-get update
-sudo apt-get install -y e2fsprogs squashfs-tools curl ca-certificates python3 xz-utils
+sudo apt-get install -y e2fsprogs squashfs-tools curl ca-certificates python3 xz-utils acl
+if [[ -e /dev/kvm ]]; then
+  sudo setfacl -m "u:${USER}:rw" /dev/kvm
+fi
 
 if ! command -v node >/dev/null || [[ "$(node -p process.versions.node)" != 24.* ]]; then
   NODE_TAR="node-v24.22.0-linux-arm64.tar.xz"
@@ -60,7 +63,7 @@ if [[ ! -f "${IMG}/ubuntu.squashfs" ]]; then
   mv "${IMG}/ubuntu.squashfs.tmp" "${IMG}/ubuntu.squashfs"
 fi
 
-rm -rf "${WORK}/squashfs-root"
+sudo rm -rf "${WORK}/squashfs-root"
 unsquashfs -d "${WORK}/squashfs-root" "${IMG}/ubuntu.squashfs"
 mkdir -p "${WORK}/squashfs-root/opt/sandbox" \
   "${WORK}/squashfs-root/etc/systemd/system/multi-user.target.wants"

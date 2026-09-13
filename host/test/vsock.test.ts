@@ -170,4 +170,46 @@ describe("vsock handshake", () => {
       server.close();
     }
   });
+
+  it("retries when the first connection closes before the guest answers", async () => {
+    const sockPath = path.join(os.tmpdir(), `vsock-retry-${process.pid}.sock`);
+    let attempts = 0;
+    const server = net.createServer((socket) => {
+      attempts += 1;
+      if (attempts === 1) {
+        socket.destroy();
+        return;
+      }
+      let buf = Buffer.alloc(0);
+      let connectDone = false;
+      socket.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (!connectDone) {
+          const nl = buf.indexOf(0x0a);
+          if (nl === -1) return;
+          assert.equal(buf.subarray(0, nl).toString("utf8"), `CONNECT ${VSOCK_PORT}`);
+          buf = buf.subarray(nl + 1);
+          socket.write(`OK ${VSOCK_PORT}\n`);
+          connectDone = true;
+        }
+        if (buf.length < 4) return;
+        const length = buf.readUInt32BE(0);
+        if (buf.length < 4 + length) return;
+        socket.end(encodeFrame({
+          stdout: "ok\n",
+          stderr: "",
+          exitCode: 0,
+          truncated: false,
+        }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(sockPath, resolve));
+    try {
+      const result = await connectAndExchange(sockPath, "echo retry", 2000);
+      assert.equal(result.stdout, "ok\n");
+      assert.ok(attempts >= 2);
+    } finally {
+      server.close();
+    }
+  });
 });

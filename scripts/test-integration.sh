@@ -10,14 +10,14 @@ if [[ ! -e /dev/kvm ]]; then
 fi
 
 set +e
-"${CLI[@]}" exec --timeout 30 -- echo hello > /tmp/sandbox-hello.out
+"${CLI[@]}" exec --timeout 30 -- echo hello > /tmp/sandbox-hello.out 2>/tmp/sandbox-hello.err
 status=$?
 set -e
 if [[ "$status" -ne 0 ]]; then
   echo "echo hello exited ${status}" >&2
   exit 1
 fi
-python3 -c 'import pathlib,sys; data=pathlib.Path("/tmp/sandbox-hello.out").read_bytes(); sys.exit(0 if data==b"hello\n" else 1)'
+python3 -c 'import pathlib,sys; out=pathlib.Path("/tmp/sandbox-hello.out").read_bytes(); err=pathlib.Path("/tmp/sandbox-hello.err").read_bytes(); sys.exit(0 if out==b"hello\n" and err==b"" else 1)'
 
 set +e
 "${CLI[@]}" exec --timeout 30 -- false >/tmp/sandbox-false.out

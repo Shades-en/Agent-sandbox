@@ -21,6 +21,8 @@ limactl shell fc -- ls -l /dev/kvm
 
 If `/dev/kvm` is missing, stop. Nested virtualization did not come up. Nothing later in this lesson can run.
 
+If the device is there but you cannot open it, `scripts/setup-host.sh` grants this user read and write with `setfacl`.
+
 ## The API socket
 
 `scripts/setup-host.sh` downloads Firecracker v1.17.0, a guest kernel, and an Ubuntu root disk. It installs `guest/agent.py` into that disk and enables `sandbox-agent.service`.
@@ -65,6 +67,8 @@ limactl shell fc -- node "$PWD/host/dist/cli.js" exec --timeout 10 -- echo hello
 ```
 
 Run that from the repo root on the Mac. `limactl shell` keeps the current directory when it is inside the home mount. Expected stdout is `hello`.
+
+A boot that never reaches `CONNECT` exits 1 and names `~/.sandbox/run/<id>/serial.log`. A command that exceeds the timeout prints `timeout` and exits 124. When the root disk cannot be reflinked, that notice goes to the run's `controller.log`, not the command's stderr.
 
 `scripts/test-integration.sh` runs that check and a `false` check inside the Lima VM.
 

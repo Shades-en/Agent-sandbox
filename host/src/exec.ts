@@ -99,7 +99,9 @@ export function defaultEnv(): ExecEnv {
     rootfsBase: path.join(home, "images", "rootfs.ext4"),
     firecrackerBin: path.join(home, "bin", "firecracker"),
     async copy(base, dest) {
-      await copyRootfs(base, dest, (line) => process.stderr.write(`${line}\n`));
+      await copyRootfs(base, dest, (line) => {
+        fs.appendFileSync(path.join(path.dirname(dest), "controller.log"), `${line}\n`);
+      });
     },
     spawn: spawnFirecracker,
     waitForApi: waitForSocket,

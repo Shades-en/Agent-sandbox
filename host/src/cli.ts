@@ -7,6 +7,15 @@ export function kvmMissingMessage(): string {
   return "sandbox: /dev/kvm is missing. Nested virtualization did not come up in the Lima VM.";
 }
 
+export function kvmDeniedMessage(): string {
+  return "sandbox: /dev/kvm is present but not writable. Grant the Lima user access with setfacl.";
+}
+
+export function openKvm(kvmPath: string): void {
+  const fd = fs.openSync(kvmPath, "r+");
+  fs.closeSync(fd);
+}
+
 export function parseExecArgs(argv: string[]): { timeoutSec: number; command: string } {
   if (argv[0] !== "exec") {
     throw new Error("usage: exec [--timeout seconds] -- <command>");
@@ -46,9 +55,19 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
     io.stderr(`sandbox: ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
   }
-  if (!fs.existsSync(io.kvmPath)) {
-    io.stderr(`${kvmMissingMessage()}\n`);
-    return 1;
+  try {
+    openKvm(io.kvmPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      io.stderr(`${kvmMissingMessage()}\n`);
+      return 1;
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      io.stderr(`${kvmDeniedMessage()}\n`);
+      return 1;
+    }
+    throw error;
   }
   try {
     const result = await io.exec(parsed.command, parsed.timeoutSec);
