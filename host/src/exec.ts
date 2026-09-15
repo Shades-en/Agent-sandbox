@@ -38,6 +38,9 @@ export interface ExecEnv {
   log: (line: string) => void;
 }
 
+// Each command gets its own disk copy so the base image stays unchanged.
+// A reflink is a cheap copy-on-write clone. ext4 in the Lima VM cannot do
+// that, so we fall back to a normal copy and note it in controller.log.
 export async function copyRootfs(base: string, dest: string, log: (line: string) => void): Promise<void> {
   try {
     await execFileAsync("cp", ["--reflink=always", base, dest]);
@@ -113,6 +116,8 @@ export function defaultEnv(): ExecEnv {
   };
 }
 
+// Boot a fresh microVM, run one command, then kill Firecracker.
+// The run directory is left behind so serial.log can be inspected.
 export async function execCommand(
   command: string,
   timeoutSec: number,
@@ -128,6 +133,8 @@ export async function execCommand(
   const vsockPath = path.join(runDir, "v.sock");
   const logPath = path.join(runDir, "firecracker.log");
   const serialPath = path.join(runDir, "serial.log");
+  // Firecracker is idle until we PUT the boot config. Its serial console
+  // (kernel messages) is redirected into serial.log.
   const child = env.spawn({
     bin: env.firecrackerBin,
     apiSock,
@@ -142,6 +149,7 @@ export async function execCommand(
       rootfsPath,
       vsockPath,
     });
+    // The guest is booting now. exchange waits until its agent accepts vsock.
     const response = await env.exchange(vsockPath, command, timeoutSec * 1000);
     return {
       stdout: response.stdout,
@@ -150,6 +158,8 @@ export async function execCommand(
       runDir,
     };
   } catch (error) {
+    // A command that runs too long is a result. A boot that never connects
+    // is a thrown error, so the caller can tell the two apart.
     if (error instanceof CommandTimeoutError) {
       return { stdout: "", stderr: "timeout\n", exitCode: 124, runDir };
     }

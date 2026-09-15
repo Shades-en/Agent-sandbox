@@ -24,17 +24,24 @@ export interface ApiCall {
   body: unknown;
 }
 
+// Firecracker is configured before the guest boots. Each call is an HTTP PUT
+// on the API socket. A 204 means "accepted". The guest starts only on the
+// last call. There is no network interface in this slice.
 export function bootCalls(request: BootRequest): ApiCall[] {
   return [
     {
+      // CPU and memory. smt off means one thread per vCPU.
       path: "/machine-config",
       body: { vcpu_count: VCPU_COUNT, mem_size_mib: MEM_SIZE_MIB, smt: false },
     },
     {
+      // Kernel file on the Lima host, plus the kernel command line.
       path: "/boot-source",
       body: { kernel_image_path: request.kernelPath, boot_args: BOOT_ARGS },
     },
     {
+      // The guest's disk. path_on_host is the per-run copy, not the base image.
+      // is_root_device tells Firecracker to add the root= argument for us.
       path: "/drives/rootfs",
       body: {
         drive_id: "rootfs",
@@ -44,16 +51,21 @@ export function bootCalls(request: BootRequest): ApiCall[] {
       },
     },
     {
+      // vsock device. guest_cid is the guest's address. uds_path is the Unix
+      // socket on the Lima host that we connect to after boot.
       path: "/vsock",
       body: { guest_cid: GUEST_CID, uds_path: request.vsockPath },
     },
     {
+      // Start the vCPUs. Everything above must already be configured.
       path: "/actions",
       body: { action_type: "InstanceStart" },
     },
   ];
 }
 
+// The process is started with a Unix socket instead of a TCP port.
+// We configure the microVM by sending HTTP to that socket.
 export function firecrackerArgs(apiSock: string, logPath: string): string[] {
   return ["--api-sock", apiSock, "--log-path", logPath];
 }

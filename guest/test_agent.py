@@ -24,14 +24,14 @@ class AgentTest(unittest.TestCase):
         self.assertLessEqual(len(text.encode("utf-8")), MAX_STREAM)
 
     def test_run_command_echo(self):
-        result = run_command("echo hello")
+        result = run_command('console.log("hello")')
         self.assertEqual(result["stdout"], "hello\n")
         self.assertEqual(result["stderr"], "")
         self.assertEqual(result["exitCode"], 0)
         self.assertFalse(result["truncated"])
 
     def test_run_command_false(self):
-        result = run_command("false")
+        result = run_command("process.exit(1)")
         self.assertNotEqual(result["exitCode"], 0)
 
     def test_response_frame_fits_heavy_json_escaping(self):
@@ -55,7 +55,7 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(normalize_exit_code(-9), 137)
 
     def test_run_command_large_stdout_truncates(self):
-        result = run_command("python3 -c \"import sys; sys.stdout.write('a' * (256 * 1024 + 1))\"")
+        result = run_command("process.stdout.write('a'.repeat(256 * 1024 + 1))")
         self.assertTrue(result["truncated"])
         self.assertLessEqual(len(result["stdout"].encode("utf-8")), MAX_STREAM)
         self.assertGreaterEqual(result["exitCode"], 0)
@@ -64,9 +64,7 @@ class AgentTest(unittest.TestCase):
         self.assertLessEqual(len(frame) - 4, MAX_FRAME)
 
     def test_run_command_pipeline_group_kill(self):
-        cmd = (
-            "python3 -c 'import sys\nwhile True:\n sys.stdout.buffer.write(b\"x\"*4096)' | cat"
-        )
+        cmd = "const fs = require('fs'); while (true) fs.writeSync(1, 'x'.repeat(4096))"
         def on_alarm(_signum, _frame):
             raise TimeoutError("run_command hung")
 

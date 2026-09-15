@@ -11,6 +11,9 @@ export function kvmDeniedMessage(): string {
   return "sandbox: /dev/kvm is present but not writable. Grant the Lima user access with setfacl.";
 }
 
+// Firecracker needs /dev/kvm inside the Lima VM. This Mac does not have it.
+// Opening the device checks that nested virtualization came up and that
+// this user can use it. We close it again; Firecracker opens it itself.
 export function openKvm(kvmPath: string): void {
   const fd = fs.openSync(kvmPath, "r+");
   fs.closeSync(fd);

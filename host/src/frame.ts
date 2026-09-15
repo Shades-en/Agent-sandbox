@@ -14,6 +14,8 @@ export interface ExecResponse {
   truncated: boolean;
 }
 
+// A frame is 4 big-endian length bytes, then that many UTF-8 JSON bytes.
+// Both the Lima host and the guest use this layout on the vsock pipe.
 export function encodeFrame(payload: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(payload), "utf8");
   if (body.length > MAX_FRAME_BYTES) {

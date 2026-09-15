@@ -17,8 +17,10 @@ export function cliPath(): string {
   return path.join(repoRoot, "host", "dist", "cli.js");
 }
 
-export function sandboxArgs(cli: string, command: string): string[] {
-  return ["shell", "fc", "--", "node", cli, "exec", "--timeout", "10", "--", command];
+// Ari runs on the Mac. Firecracker runs in the Lima VM named fc.
+// limactl shell enters that VM and runs the controller there.
+export function sandboxArgs(cli: string, source: string): string[] {
+  return ["shell", "fc", "--", "node", cli, "exec", "--timeout", "10", "--", source];
 }
 
 export function interpretControllerResult(result: ControllerResult): ControllerResult {
@@ -52,14 +54,15 @@ export function runLimactl(args: string[]): Promise<ControllerResult> {
   });
 }
 
-export const bashTool = defineTool({
-  description: "Run a shell command inside the Firecracker sandbox",
+export const javascriptTool = defineTool({
+  description:
+    "Run JavaScript inside the Firecracker microVM. Node.js executes the source. There is no shell and no network.",
   input: z.object({
-    command: z.string().describe("Shell command to run inside the microVM"),
+    code: z.string().describe("JavaScript source to run inside the microVM"),
   }),
   effect: "destructive",
-  async execute({ command }) {
-    const result = await runLimactl(sandboxArgs(cliPath(), command));
+  async execute({ code }) {
+    const result = await runLimactl(sandboxArgs(cliPath(), code));
     return interpretControllerResult(result);
   },
 });

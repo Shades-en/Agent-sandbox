@@ -1,6 +1,6 @@
 # Firecracker starter
 
-This repo boots a microVM and runs one shell command inside it. An Ari agent on the Mac calls that command as a bash tool.
+This repo boots a microVM and runs one JavaScript program inside it. An Ari agent on the Mac calls that program as a tool. Node.js runs the source. There is no shell.
 
 ## Three places
 
@@ -8,7 +8,7 @@ Your Mac runs Ari. It cannot run Firecracker.
 
 The Lima VM named `fc` is the Firecracker host. The `firecracker` process and `host/dist/cli.js` run there. Firecracker needs `/dev/kvm` in that VM.
 
-The microVM is the guest. `guest/agent.py` runs there and executes bash. A command cannot see the Mac or the Lima VM's files.
+The microVM is the guest. `guest/agent.py` runs there and passes the source to `node`. A program cannot see the Mac or the Lima VM's files.
 
 ## KVM
 
@@ -25,7 +25,7 @@ If the device is there but you cannot open it, `scripts/setup-host.sh` grants th
 
 ## The API socket
 
-`scripts/setup-host.sh` downloads Firecracker v1.17.0, a guest kernel, and an Ubuntu root disk. It installs `guest/agent.py` into that disk and enables `sandbox-agent.service`.
+`scripts/setup-host.sh` downloads Firecracker v1.17.0, a guest kernel, and an Ubuntu root disk. It installs `guest/agent.py` into that disk, enables `sandbox-agent.service`, and installs Node.js on the disk. A command inside the microVM can run `node`. The guest has no network, so `npm` cannot download packages.
 
 ```bash
 limactl shell fc -- ./scripts/setup-host.sh
@@ -63,10 +63,10 @@ OK <port>
 After that the socket is a byte pipe. Each message is a 4-byte big-endian length plus JSON.
 
 ```bash
-limactl shell fc -- node "$PWD/host/dist/cli.js" exec --timeout 10 -- echo hello
+limactl shell fc -- node "$PWD/host/dist/cli.js" exec --timeout 10 -- 'console.log("hello")'
 ```
 
-Run that from the repo root on the Mac. `limactl shell` keeps the current directory when it is inside the home mount. Expected stdout is `hello`.
+Run that from the repo root on the Mac. `limactl shell` keeps the current directory when it is inside the home mount. The text after `--` is the JavaScript source. Expected stdout is `hello`.
 
 A boot that never reaches `CONNECT` exits 1 and names `~/.sandbox/run/<id>/serial.log`. A command that exceeds the timeout prints `timeout` and exits 124. When the root disk cannot be reflinked, that notice goes to the run's `controller.log`, not the command's stderr.
 
@@ -74,15 +74,15 @@ A boot that never reaches `CONNECT` exits 1 and names `~/.sandbox/run/<id>/seria
 
 ## Ari
 
-The agent package lives in this repo. It depends on the Ari checkout next door. Build Ari once, then install here:
+The agent package lives in this repo. It depends on the Ari checkout next door. Put `OPENAI_API_KEY` in `agent/.env`. Build Ari once, then install here:
 
 ```bash
 pnpm --dir ../ai/ari build
 cd agent && pnpm install && pnpm build
-OPENAI_API_KEY=... node dist/run.js "Run echo hello in the sandbox and tell me what it printed."
+node dist/run.js "Run console.log('hello') in the sandbox and tell me what it printed."
 ```
 
-The bash tool is `destructive`. Its `execute` function runs `limactl shell fc -- node … exec -- <command>`. The model never gets a shell on the Mac.
+The javascript tool is `destructive`. Its `execute` function runs `limactl shell fc -- node … exec -- <source>`. The model never gets a shell on the Mac, and text in its reply is not executed. Only the tool call runs.
 
 ## What this slice leaves out
 

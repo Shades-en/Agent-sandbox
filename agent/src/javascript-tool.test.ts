@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { interpretControllerResult, sandboxArgs } from "./bash-tool.js";
+import { interpretControllerResult, sandboxArgs } from "./javascript-tool.js";
 
-describe("bash tool", () => {
+describe("javascript tool", () => {
   it("builds the limactl command", () => {
-    assert.deepEqual(sandboxArgs("/repo/host/dist/cli.js", "echo hello"), [
+    assert.deepEqual(sandboxArgs("/repo/host/dist/cli.js", "console.log('hello')"), [
       "shell",
       "fc",
       "--",
@@ -15,7 +15,7 @@ describe("bash tool", () => {
       "--timeout",
       "10",
       "--",
-      "echo hello",
+      "console.log('hello')",
     ]);
   });
 

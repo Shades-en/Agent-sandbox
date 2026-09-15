@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Listen on vsock port 5000 and run one bash command."""
+"""Guest-side listener. This is not an AI agent.
+
+systemd starts this at boot inside the microVM. It accepts one vsock
+connection, runs that payload as a Node.js script, writes the result back,
+and exits. There is no shell. The guest has no IP address. vsock is the
+only way the Lima host reaches it.
+"""
 
 import json
 import os
 import select
+import shutil
 import signal
 import socket
 import struct
@@ -12,6 +19,7 @@ import subprocess
 MAX_FRAME = 1024 * 1024
 MAX_STREAM = 256 * 1024
 PORT = 5000
+# /usr/local/bin is where setup-host.sh installs Node.js inside the guest.
 GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _READ_CHUNK = 8192
 
@@ -166,15 +174,24 @@ def _read_capped_output(proc: subprocess.Popen) -> tuple[bytes, bytes, bool]:
     return bytes(stdout_buf), bytes(stderr_buf), truncated
 
 
-def run_command(command: str) -> dict:
+def run_command(source: str) -> dict:
+    # `node` with a pipe reads the script from stdin, then runs it.
+    # The guest PATH includes /usr/local/bin, where setup-host.sh put Node.
+    node = shutil.which("node")
+    if node is None:
+        raise FileNotFoundError("node is not installed")
     proc = subprocess.Popen(
-        ["bash", "-c", command],
+        [node],
         cwd="/",
-        env={"PATH": GUEST_PATH},
+        env={"PATH": GUEST_PATH, "NODE_NO_WARNINGS": "1"},
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
+    assert proc.stdin is not None
+    proc.stdin.write(source.encode("utf-8"))
+    proc.stdin.close()
     raw_out, raw_err, truncated = _read_capped_output(proc)
     stdout, out_cut = cap_text(raw_out.decode("utf-8", errors="replace"))
     stderr, err_cut = cap_text(raw_err.decode("utf-8", errors="replace"))
@@ -215,6 +232,8 @@ def handle(conn: socket.socket) -> None:
 
 
 def main() -> None:
+    # AF_VSOCK is the guest kernel's vsock socket family. VMADDR_CID_ANY
+    # means "this VM". The Lima host reaches it as context id 3, port 5000.
     server = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     server.bind((socket.VMADDR_CID_ANY, PORT))
     server.listen(1)

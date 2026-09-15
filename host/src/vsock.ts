@@ -107,6 +107,10 @@ function connectOnce(udsPath: string): Promise<net.Socket> {
   });
 }
 
+// Firecracker exposes the guest vsock device as a Unix socket. The first
+// line is a handshake, not our command: "CONNECT 5000" then "OK <port>".
+// The guest may still be booting, so a closed socket is retried until the
+// boot deadline. That failure is not a command timeout.
 async function connectGuest(udsPath: string, deadline: number): Promise<net.Socket> {
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -142,6 +146,8 @@ async function connectGuest(udsPath: string, deadline: number): Promise<net.Sock
   throw lastError instanceof Error ? lastError : new Error("vsock connect failed");
 }
 
+// After the handshake the socket is a plain byte pipe. We write one
+// length-prefixed JSON command and read one JSON response.
 export async function connectAndExchange(
   udsPath: string,
   command: string,

@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Run this inside the Lima VM, once, before any microVM boot.
+# It downloads Firecracker, a guest kernel, and an Ubuntu root disk, then
+# bakes guest/agent.py and Node.js into that disk. Nothing here starts a microVM.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -16,14 +19,32 @@ mkdir -p "$IMG" "$BIN" "$WORK"
 sudo apt-get update
 sudo apt-get install -y e2fsprogs squashfs-tools curl ca-certificates python3 xz-utils acl
 if [[ -e /dev/kvm ]]; then
-  sudo setfacl -m "u:${USER}:rw" /dev/kvm
+  # limactl shell does not set $USER, so id -un is the account that runs node.
+  LIMA_USER="$(id -un)"
+  sudo usermod -aG kvm "$LIMA_USER"
+  # Opening a microVM makes udev reapply the stock kvm rule (root:kvm 0660).
+  # That deletes a setfacl entry, so the next run is denied. This rule keeps
+  # the device writable after every Firecracker exit.
+  sudo tee /etc/udev/rules.d/99-firecracker-kvm.rules >/dev/null <<'EOF'
+KERNEL=="kvm", GROUP="kvm", MODE="0666"
+EOF
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --name-match=kvm
 fi
 
+# Same Node build for the Lima host (runs the controller) and the microVM
+# (runs JavaScript). The guest has no network, so npm cannot fetch packages.
+NODE_VER="v24.22.0"
+NODE_TAR="node-${NODE_VER}-linux-arm64.tar.xz"
+NODE_SHA="fef00bb4d36e1c50104a9775a10359beee98f162b4104dd12472c75065c6a143"
+NODE_TGZ="${WORK}/${NODE_TAR}"
+if [[ ! -f "$NODE_TGZ" ]]; then
+  curl -fsSL "https://nodejs.org/dist/${NODE_VER}/${NODE_TAR}" -o "${NODE_TGZ}.tmp"
+  echo "${NODE_SHA}  ${NODE_TGZ}.tmp" | sha256sum -c -
+  mv "${NODE_TGZ}.tmp" "$NODE_TGZ"
+fi
 if ! command -v node >/dev/null || [[ "$(node -p process.versions.node)" != 24.* ]]; then
-  NODE_TAR="node-v24.22.0-linux-arm64.tar.xz"
-  curl -fsSL "https://nodejs.org/dist/v24.22.0/${NODE_TAR}" -o "${WORK}/${NODE_TAR}"
-  echo "fef00bb4d36e1c50104a9775a10359beee98f162b4104dd12472c75065c6a143  ${WORK}/${NODE_TAR}" | sha256sum -c -
-  sudo tar -xJf "${WORK}/${NODE_TAR}" -C /usr/local --strip-components=1
+  sudo tar -xJf "$NODE_TGZ" -C /usr/local --strip-components=1
 fi
 
 if [[ ! -f "$MANIFEST" ]]; then
@@ -73,7 +94,11 @@ cp "${ROOT}/guest/sandbox-agent.service" \
   "${WORK}/squashfs-root/etc/systemd/system/sandbox-agent.service"
 ln -sf /etc/systemd/system/sandbox-agent.service \
   "${WORK}/squashfs-root/etc/systemd/system/multi-user.target.wants/sandbox-agent.service"
+# /usr/local/bin is already on the guest PATH. The agent runs this node
+# with the tool source on stdin. There is no shell inside the microVM.
+sudo tar -xJf "$NODE_TGZ" -C "${WORK}/squashfs-root/usr/local" --strip-components=1
 sudo chown -R root:root "${WORK}/squashfs-root"
+sudo chroot "${WORK}/squashfs-root" /usr/local/bin/node -e 'process.stdout.write(process.version + "\n")'
 truncate -s 1G "${IMG}/rootfs.ext4.tmp"
 sudo mkfs.ext4 -d "${WORK}/squashfs-root" -F "${IMG}/rootfs.ext4.tmp"
 mv "${IMG}/rootfs.ext4.tmp" "${IMG}/rootfs.ext4"

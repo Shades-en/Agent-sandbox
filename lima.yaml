@@ -1,6 +1,9 @@
+# Lima VM that will run the firecracker process. The Mac cannot.
 base:
   - template:ubuntu
 
+# vz is Apple's hypervisor. nestedVirtualization exposes /dev/kvm in this VM
+# so Firecracker can create a microVM inside it. Needs an Apple M3 or newer.
 vmType: vz
 nestedVirtualization: true
 cpus: 4
