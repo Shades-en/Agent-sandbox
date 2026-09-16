@@ -1,6 +1,6 @@
 # Firecracker command sandbox
 
-A starter that boots a Firecracker microVM and runs one shell command inside it. The command returns stdout, stderr, and an exit code. An Ari agent in this repo calls that path as a bash tool.
+A sandbox where an Ari agent runs one JavaScript program inside a Firecracker microVM. The program returns stdout, stderr, and an exit code.
 
 Date: 2026-10-16
 

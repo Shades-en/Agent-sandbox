@@ -1,12 +1,12 @@
-# Firecracker starter
+# Agent sandbox
 
-This repo boots a microVM and runs one JavaScript program inside it. An Ari agent on the Mac calls that program as a tool. Node.js runs the source. There is no shell.
+An Ari agent runs JavaScript inside a Firecracker microVM. Node.js executes the source. The guest has no shell and no network, so the program cannot see the Mac or the Lima VM's files.
 
 ## Three places
 
 Your Mac runs Ari. It cannot run Firecracker.
 
-The Lima VM named `fc` is the Firecracker host. The `firecracker` process and `host/dist/cli.js` run there. Firecracker needs `/dev/kvm` in that VM.
+The Lima VM named `fc` is the Firecracker host. `fc` is only that instance's name. It is the Linux machine where the `firecracker` process and `host/dist/cli.js` run. Firecracker needs `/dev/kvm` in that VM. The microVM is a separate machine that `fc` creates for each call.
 
 The microVM is the guest. `guest/agent.py` runs there and passes the source to `node`. A program cannot see the Mac or the Lima VM's files.
 
@@ -21,7 +21,9 @@ limactl shell fc -- ls -l /dev/kvm
 
 If `/dev/kvm` is missing, stop. Nested virtualization did not come up. Nothing later in this lesson can run.
 
-If the device is there but you cannot open it, `scripts/setup-host.sh` grants this user read and write with `setfacl`.
+`scripts/setup-host.sh` installs a udev rule that leaves `/dev/kvm` writable. A one-time `setfacl` is not enough: starting a microVM makes udev restore the stock `root:kvm` mode `0660` and drop that entry.
+
+After a Mac reboot, `fc` is stopped and its disk is still at `~/.lima/fc`. Start it again with `limactl start fc`. Do not run `setup-host.sh` again unless you changed `guest/agent.py` or deleted the `fc` instance.
 
 ## The API socket
 
@@ -66,11 +68,11 @@ After that the socket is a byte pipe. Each message is a 4-byte big-endian length
 limactl shell fc -- node "$PWD/host/dist/cli.js" exec --timeout 10 -- 'console.log("hello")'
 ```
 
-Run that from the repo root on the Mac. `limactl shell` keeps the current directory when it is inside the home mount. The text after `--` is the JavaScript source. Expected stdout is `hello`.
+Run that from the repo root on the Mac. `limactl shell` keeps the current directory when it is inside the home mount. The text after `--` is the JavaScript source. Expected stdout is `hello`. The wait is about 15 seconds because this slice boots a new microVM for every call.
 
 A boot that never reaches `CONNECT` exits 1 and names `~/.sandbox/run/<id>/serial.log`. A command that exceeds the timeout prints `timeout` and exits 124. When the root disk cannot be reflinked, that notice goes to the run's `controller.log`, not the command's stderr.
 
-`scripts/test-integration.sh` runs that check and a `false` check inside the Lima VM.
+`scripts/test-integration.sh` runs that check and a `process.exit(1)` check inside the Lima VM.
 
 ## Ari
 
