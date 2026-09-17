@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -9,10 +8,11 @@ import { CommandTimeoutError } from "../src/vsock.js";
 import { defaultEnv, execCommand } from "../src/exec.js";
 
 describe("execCommand", () => {
-  it("copies the rootfs, configures, exchanges one command, and kills the process", async () => {
+  it("copies the prepared snapshot disk, configures, exchanges, and kills the process", async () => {
     const calls: string[] = [];
     let killed = false;
     const result = await execCommand("echo hello", 10, {
+      async prepare() { return "/snapshot/rootfs.ext4"; },
       home: "/tmp/sandbox",
       kernelPath: "/images/vmlinux",
       rootfsBase: "/images/rootfs.ext4",
@@ -36,6 +36,7 @@ describe("execCommand", () => {
       },
       log() {},
     });
+    assert.ok(calls[0].startsWith("copy /snapshot/rootfs.ext4 "));
     assert.equal(result.stdout, "hello\n");
     assert.equal(result.exitCode, 0);
     assert.equal(killed, true);
@@ -51,6 +52,7 @@ describe("execCommand", () => {
   it("returns timeout and still kills the process", async () => {
     let killed = false;
     const result = await execCommand("sleep 30", 1, {
+      prepare: undefined,
       home: "/tmp/sandbox",
       kernelPath: "/k",
       rootfsBase: "/r",
@@ -76,6 +78,7 @@ describe("execCommand", () => {
     const home = await mkdtemp(path.join(os.tmpdir(), "exec-boot-"));
     await assert.rejects(
       () => execCommand("echo", 10, {
+        prepare: undefined,
         home,
         kernelPath: "/k",
         rootfsBase: "/r",
@@ -99,31 +102,6 @@ describe("execCommand", () => {
     );
   });
 
-  it("records a reflink refusal beside the run, not on stderr", async () => {
-    const home = await mkdtemp(path.join(os.tmpdir(), "exec-copy-"));
-    const base = path.join(home, "base");
-    const dest = path.join(home, "run", "rootfs.ext4");
-    await mkdir(path.dirname(dest), { recursive: true });
-    fs.writeFileSync(base, "image");
-    const written: string[] = [];
-    const original = process.stderr.write;
-    process.stderr.write = ((chunk: string | Uint8Array) => {
-      written.push(String(chunk));
-      return true;
-    }) as typeof process.stderr.write;
-    try {
-      await defaultEnv().copy(base, dest);
-    } finally {
-      process.stderr.write = original;
-    }
-    assert.equal(fs.readFileSync(dest, "utf8"), "image");
-    assert.deepEqual(written, []);
-    const note = path.join(home, "run", "controller.log");
-    if (fs.existsSync(note)) {
-      assert.match(fs.readFileSync(note, "utf8"), /reflink refused/);
-    }
-  });
-
   it("rejects when spawn fails and still kills the process", async () => {
     const home = await mkdtemp(path.join(os.tmpdir(), "exec-spawn-err-"));
     const missingBin = path.join(home, "missing-firecracker");
@@ -131,6 +109,7 @@ describe("execCommand", () => {
     const realSpawn = defaultEnv().spawn;
     await assert.rejects(
       () => execCommand("echo", 10, {
+        prepare: undefined,
         home,
         kernelPath: "/k",
         rootfsBase: "/r",

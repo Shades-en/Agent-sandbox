@@ -1,17 +1,16 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
 
 import { BOOT_TIMEOUT_MS } from "./constants.js";
-import { configureAndStart, firecrackerArgs, type BootRequest } from "./firecracker.js";
+import { firecrackerArgs, restoreSnapshot, type BootRequest } from "./firecracker.js";
 import { CommandTimeoutError, connectAndExchange } from "./vsock.js";
+import { ensureSnapshot } from "./snapshot.js";
+import { assertBtrfsStorage, copyRootfs } from "./storage.js";
 import type { ExecResponse } from "./frame.js";
-
-const execFileAsync = promisify(execFile);
 
 export interface ExecResult {
   stdout: string;
@@ -27,6 +26,8 @@ export interface FirecrackerHandle {
 
 export interface ExecEnv {
   home: string;
+  // Returns the disk that matches the saved memory, before the per-run copy.
+  prepare?: () => Promise<string>;
   kernelPath: string;
   rootfsBase: string;
   firecrackerBin: string;
@@ -36,18 +37,6 @@ export interface ExecEnv {
   configure: (apiSock: string, request: BootRequest) => Promise<void>;
   exchange: (vsockPath: string, command: string, timeoutMs: number) => Promise<ExecResponse>;
   log: (line: string) => void;
-}
-
-// Each command gets its own disk copy so the base image stays unchanged.
-// A reflink is a cheap copy-on-write clone. ext4 in the Lima VM cannot do
-// that, so we fall back to a normal copy and note it in controller.log.
-export async function copyRootfs(base: string, dest: string, log: (line: string) => void): Promise<void> {
-  try {
-    await execFileAsync("cp", ["--reflink=always", base, dest]);
-  } catch {
-    log("reflink refused; copied rootfs byte for byte");
-    await execFileAsync("cp", [base, dest]);
-  }
 }
 
 async function waitForSocket(apiSock: string, deadline: number): Promise<void> {
@@ -82,6 +71,7 @@ function spawnFirecracker(args: {
     firecrackerArgs(args.apiSock, args.logPath),
     { stdio: ["ignore", serial, serial] },
   );
+  fs.closeSync(serial);
   const ready = new Promise<void>((resolve, reject) => {
     child.once("spawn", () => resolve());
     child.once("error", (err) => {
@@ -95,28 +85,34 @@ function spawnFirecracker(args: {
 }
 
 export function defaultEnv(): ExecEnv {
-  const home = path.join(os.homedir(), ".sandbox");
-  return {
+  const base = path.join(os.homedir(), ".sandbox");
+  const home = path.join(base, "storage");
+  let snapshotDirectory: string;
+  const env: ExecEnv = {
     home,
-    kernelPath: path.join(home, "images", "vmlinux"),
+    kernelPath: path.join(base, "images", "vmlinux"),
     rootfsBase: path.join(home, "images", "rootfs.ext4"),
-    firecrackerBin: path.join(home, "bin", "firecracker"),
-    async copy(base, dest) {
-      await copyRootfs(base, dest, (line) => {
-        fs.appendFileSync(path.join(path.dirname(dest), "controller.log"), `${line}\n`);
-      });
-    },
+    firecrackerBin: path.join(base, "bin", "firecracker"),
+    copy: copyRootfs,
     spawn: spawnFirecracker,
     waitForApi: waitForSocket,
-    configure: configureAndStart,
+    async prepare() {
+      await assertBtrfsStorage(home);
+      snapshotDirectory = await ensureSnapshot(env);
+      return path.join(snapshotDirectory, "rootfs.ext4");
+    },
+    async configure(socket, request) {
+      await restoreSnapshot(socket, snapshotDirectory, request);
+    },
     exchange: connectAndExchange,
     log(line) {
       process.stderr.write(`${line}\n`);
     },
   };
+  return env;
 }
 
-// Boot a fresh microVM, run one command, then kill Firecracker.
+// Restore a fresh microVM, run one command, then kill Firecracker.
 // The run directory is left behind so serial.log can be inspected.
 export async function execCommand(
   command: string,
@@ -126,14 +122,15 @@ export async function execCommand(
   const env: ExecEnv = { ...defaultEnv(), ...overrides };
   const id = `${process.pid}-${randomBytes(4).toString("hex")}`;
   const runDir = path.join(env.home, "run", id);
+  const base = env.prepare ? await env.prepare() : env.rootfsBase;
   await mkdir(runDir, { recursive: true });
   const rootfsPath = path.join(runDir, "rootfs.ext4");
-  await env.copy(env.rootfsBase, rootfsPath);
+  await env.copy(base, rootfsPath);
   const apiSock = path.join(runDir, "api.sock");
   const vsockPath = path.join(runDir, "v.sock");
   const logPath = path.join(runDir, "firecracker.log");
   const serialPath = path.join(runDir, "serial.log");
-  // Firecracker is idle until we PUT the boot config. Its serial console
+  // Firecracker is idle until we load its snapshot. Its serial console
   // (kernel messages) is redirected into serial.log.
   const child = env.spawn({
     bin: env.firecrackerBin,
@@ -149,7 +146,7 @@ export async function execCommand(
       rootfsPath,
       vsockPath,
     });
-    // The guest is booting now. exchange waits until its agent accepts vsock.
+    // The guest has resumed. exchange reconnects to its saved vsock listener.
     const response = await env.exchange(vsockPath, command, timeoutSec * 1000);
     return {
       stdout: response.stdout,

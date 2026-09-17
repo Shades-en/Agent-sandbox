@@ -2,9 +2,9 @@
 """Guest-side listener. This is not an AI agent.
 
 systemd starts this at boot inside the microVM. It accepts one vsock
-connection, runs that payload as a Node.js script, writes the result back,
-and exits. There is no shell. The guest has no IP address. vsock is the
-only way the Lima host reaches it.
+connection, feeds that payload to an already-running Node.js process, writes
+the result back, and exits. There is no shell. The guest has no IP address.
+vsock is the only way the Lima host reaches it.
 """
 
 import json
@@ -15,6 +15,7 @@ import signal
 import socket
 import struct
 import subprocess
+from pathlib import Path
 
 MAX_FRAME = 1024 * 1024
 MAX_STREAM = 256 * 1024
@@ -174,14 +175,13 @@ def _read_capped_output(proc: subprocess.Popen) -> tuple[bytes, bytes, bool]:
     return bytes(stdout_buf), bytes(stderr_buf), truncated
 
 
-def run_command(source: str) -> dict:
-    # `node` with a pipe reads the script from stdin, then runs it.
-    # The guest PATH includes /usr/local/bin, where setup-host.sh put Node.
+def start_runtime() -> subprocess.Popen:
+    # Start Node BEFORE the snapshot, not after a tool call arrives.
     node = shutil.which("node")
     if node is None:
         raise FileNotFoundError("node is not installed")
     proc = subprocess.Popen(
-        [node],
+        [node, str(Path(__file__).with_name("runtime.cjs"))],
         cwd="/",
         env={"PATH": GUEST_PATH, "NODE_NO_WARNINGS": "1"},
         stdin=subprocess.PIPE,
@@ -189,6 +189,27 @@ def run_command(source: str) -> dict:
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
+    assert proc.stdout is not None
+    # The bootstrap has registered its input handler when it writes this line.
+    # Consume it here so it never appears in the user's stdout.
+    readable, _, _ = select.select([proc.stdout], [], [], 30)
+    if not readable or proc.stdout.readline() != b"SANDBOX_NODE_READY\n":
+        _kill_process_group(proc)
+        proc.wait()
+        if proc.stdin:
+            proc.stdin.close()
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe:
+                pipe.close()
+        raise RuntimeError("Node runtime did not become ready")
+    return proc
+
+
+def run_command(source: str, proc: subprocess.Popen | None = None) -> dict:
+    # Production passes the process saved in the snapshot. Tests may start a
+    # fresh runtime here without needing a microVM.
+    if proc is None:
+        proc = start_runtime()
     assert proc.stdin is not None
     proc.stdin.write(source.encode("utf-8"))
     proc.stdin.close()
@@ -218,7 +239,7 @@ def _read_exact(conn: socket.socket, n: int) -> bytes:
     return b"".join(chunks)
 
 
-def handle(conn: socket.socket) -> None:
+def handle(conn: socket.socket, runtime: subprocess.Popen) -> None:
     header = _read_exact(conn, 4)
     (length,) = struct.unpack(">I", header)
     if length > MAX_FRAME:
@@ -228,21 +249,34 @@ def handle(conn: socket.socket) -> None:
     command = request["command"]
     if not isinstance(command, str):
         raise ValueError("command missing")
-    conn.sendall(encode_frame(run_command(command)))
+    conn.sendall(encode_frame(run_command(command, runtime)))
 
 
 def main() -> None:
     # AF_VSOCK is the guest kernel's vsock socket family. VMADDR_CID_ANY
     # means "this VM". The Lima host reaches it as context id 3, port 5000.
+    runtime = start_runtime()
     server = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
-    server.bind((socket.VMADDR_CID_ANY, PORT))
-    server.listen(1)
-    conn, _ = server.accept()
     try:
-        handle(conn)
+        server.bind((socket.VMADDR_CID_ANY, PORT))
+        server.listen(1)
+        # Node is already waiting on stdin. Snapshotting now preserves the
+        # runtime, its pipes, and the unused vsock listener together.
+        os.sync()
+        with open("/dev/ttyS0", "w") as console:
+            console.write("SANDBOX_NODE_READY_FOR_SNAPSHOT\n")
+        conn, _ = server.accept()
+        try:
+            handle(conn, runtime)
+        finally:
+            conn.close()
     finally:
-        conn.close()
         server.close()
+        _kill_process_group(runtime)
+        runtime.wait()
+        for pipe in (runtime.stdin, runtime.stdout, runtime.stderr):
+            if pipe:
+                pipe.close()
 
 
 if __name__ == "__main__":

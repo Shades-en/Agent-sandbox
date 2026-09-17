@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Run this inside the Lima VM, once, before any microVM boot.
 # It downloads Firecracker, a guest kernel, and an Ubuntu root disk, then
-# bakes guest/agent.py and Node.js into that disk. Nothing here starts a microVM.
+# bakes the guest listener, its Node bootstrap, and Node.js into that disk.
+# Nothing here starts a microVM.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -17,7 +18,7 @@ MANIFEST="${BASE}/manifest.json"
 
 mkdir -p "$IMG" "$BIN" "$WORK"
 sudo apt-get update
-sudo apt-get install -y e2fsprogs squashfs-tools curl ca-certificates python3 xz-utils acl
+sudo apt-get install -y e2fsprogs squashfs-tools curl ca-certificates python3 xz-utils acl btrfs-progs
 if [[ -e /dev/kvm ]]; then
   # limactl shell does not set $USER, so id -un is the account that runs node.
   LIMA_USER="$(id -un)"
@@ -89,6 +90,7 @@ unsquashfs -d "${WORK}/squashfs-root" "${IMG}/ubuntu.squashfs"
 mkdir -p "${WORK}/squashfs-root/opt/sandbox" \
   "${WORK}/squashfs-root/etc/systemd/system/multi-user.target.wants"
 cp "${ROOT}/guest/agent.py" "${WORK}/squashfs-root/opt/sandbox/agent.py"
+cp "${ROOT}/guest/runtime.cjs" "${WORK}/squashfs-root/opt/sandbox/runtime.cjs"
 chmod 755 "${WORK}/squashfs-root/opt/sandbox/agent.py"
 cp "${ROOT}/guest/sandbox-agent.service" \
   "${WORK}/squashfs-root/etc/systemd/system/sandbox-agent.service"
@@ -102,4 +104,5 @@ sudo chroot "${WORK}/squashfs-root" /usr/local/bin/node -e 'process.stdout.write
 truncate -s 1G "${IMG}/rootfs.ext4.tmp"
 sudo mkfs.ext4 -d "${WORK}/squashfs-root" -F "${IMG}/rootfs.ext4.tmp"
 mv "${IMG}/rootfs.ext4.tmp" "${IMG}/rootfs.ext4"
-echo "ready: ${BIN}/firecracker ${IMG}/vmlinux ${IMG}/rootfs.ext4"
+"${ROOT}/scripts/setup-storage.sh"
+echo "ready: ${BIN}/firecracker ${IMG}/vmlinux ${BASE}/storage/images/rootfs.ext4"

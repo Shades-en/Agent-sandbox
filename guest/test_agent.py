@@ -1,5 +1,7 @@
+import select
 import signal
 import unittest
+from unittest.mock import patch
 
 from agent import (
     MAX_FRAME,
@@ -10,6 +12,7 @@ from agent import (
     fit_response_to_frame,
     normalize_exit_code,
     run_command,
+    start_runtime,
 )
 
 
@@ -33,6 +36,57 @@ class AgentTest(unittest.TestCase):
     def test_run_command_false(self):
         result = run_command("process.exit(1)")
         self.assertNotEqual(result["exitCode"], 0)
+
+    def test_uses_the_already_ready_node_process_without_spawning(self):
+        runtime = start_runtime()
+        try:
+            # The readiness line was consumed. Node is alive, with no user
+            # output and no source yet. Sending source must not spawn again.
+            self.assertIsNone(runtime.poll())
+            self.assertEqual(select.select([runtime.stdout], [], [], 0)[0], [])
+            pid = runtime.pid
+            with patch("agent.subprocess.Popen", side_effect=AssertionError("unexpected spawn")):
+                result = run_command("console.log(process.pid)", runtime)
+            self.assertEqual(result["stdout"], f"{pid}\n")
+            self.assertEqual(result["stderr"], "")
+            self.assertEqual(result["exitCode"], 0)
+        finally:
+            if runtime.poll() is None:
+                runtime.kill()
+            runtime.wait()
+            for pipe in (runtime.stdin, runtime.stdout, runtime.stderr):
+                if pipe:
+                    pipe.close()
+
+    def test_runtime_preserves_async_output_and_require(self):
+        result = run_command(
+            'const fs = require("node:fs"); '
+            'setTimeout(() => console.log(typeof fs.readFileSync), 5)'
+        )
+        self.assertEqual(result["stdout"], "function\n")
+        self.assertEqual(result["stderr"], "")
+        self.assertEqual(result["exitCode"], 0)
+
+    def test_runtime_reports_syntax_errors_and_exceptions(self):
+        for source, error in (("const =", "SyntaxError"), ('throw new Error("broken")', "broken")):
+            with self.subTest(source=source):
+                result = run_command(source)
+                self.assertEqual(result["stdout"], "")
+                self.assertEqual(result["exitCode"], 1)
+                self.assertIn(error, result["stderr"])
+                self.assertIn("/sandbox.js", result["stderr"])
+
+    def test_large_unicode_source_can_cross_the_stdin_pipe(self):
+        source = "/*" + "λ" * 100_000 + '*/ console.log("🚀")'
+        result = run_command(source)
+        self.assertEqual(result["stdout"], "🚀\n")
+        self.assertEqual(result["stderr"], "")
+        self.assertEqual(result["exitCode"], 0)
+
+    def test_runtime_startup_failure_is_not_reported_as_readiness(self):
+        with patch("agent.shutil.which", return_value="/usr/bin/false"):
+            with self.assertRaisesRegex(RuntimeError, "Node runtime did not become ready"):
+                start_runtime()
 
     def test_response_frame_fits_heavy_json_escaping(self):
         chunk = '"' * MAX_STREAM
@@ -63,8 +117,15 @@ class AgentTest(unittest.TestCase):
         frame = encode_frame(result)
         self.assertLessEqual(len(frame) - 4, MAX_FRAME)
 
-    def test_run_command_pipeline_group_kill(self):
-        cmd = "const fs = require('fs'); while (true) fs.writeSync(1, 'x'.repeat(4096))"
+    def test_run_command_infinite_output_group_kill(self):
+        # Respect pipe backpressure so the writer reaches the output cap,
+        # rather than failing early with EAGAIN on a nonblocking stdout pipe.
+        cmd = (
+            "const { once } = require('node:events'); "
+            "(async () => { while (true) { "
+            "if (!process.stdout.write('x'.repeat(4096))) "
+            "await once(process.stdout, 'drain'); } })()"
+        )
         def on_alarm(_signum, _frame):
             raise TimeoutError("run_command hung")
 

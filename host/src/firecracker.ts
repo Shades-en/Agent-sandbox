@@ -76,6 +76,7 @@ export function putJson(
   socketPath: string,
   urlPath: string,
   body: unknown,
+  method: "PUT" | "PATCH" = "PUT",
 ): Promise<{ status: number; body: string }> {
   const payload = JSON.stringify(body);
   return new Promise((resolve, reject) => {
@@ -103,7 +104,7 @@ export function putJson(
       {
         socketPath,
         path: urlPath,
-        method: "PUT",
+        method,
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
@@ -112,12 +113,9 @@ export function putJson(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        responseTimeout = setTimeout(() => {
-          fail(`API PUT ${urlPath} timed out after ${PUT_RESPONSE_TIMEOUT_MS}ms waiting for response end`);
-        }, PUT_RESPONSE_TIMEOUT_MS);
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("error", (err) => {
-          fail(`API PUT ${urlPath} response error: ${err.message}`);
+          fail(`API ${method} ${urlPath} response error: ${err.message}`);
         });
         res.on("end", () => {
           finish({
@@ -128,8 +126,11 @@ export function putJson(
       },
     );
     req.on("error", (err) => {
-      fail(`API PUT ${urlPath} request error: ${err.message}`);
+      fail(`API ${method} ${urlPath} request error: ${err.message}`);
     });
+    responseTimeout = setTimeout(() => {
+      fail(`API ${method} ${urlPath} timed out after ${PUT_RESPONSE_TIMEOUT_MS}ms`);
+    }, PUT_RESPONSE_TIMEOUT_MS);
     req.end(payload);
   });
 }
@@ -141,4 +142,29 @@ export async function configureAndStart(apiSock: string, request: BootRequest): 
       throw new ApiError(call.path, result.status, result.body);
     }
   }
+}
+
+// PATCH pauses/resumes a running guest; PUT creates or loads snapshot files.
+export async function apiUpdate(
+  socket: string, urlPath: string, body: unknown, method: "PUT" | "PATCH" = "PUT",
+): Promise<void> {
+  const result = await putJson(socket, urlPath, body, method);
+  if (result.status !== 204) throw new ApiError(urlPath, result.status, result.body);
+}
+
+export async function restoreSnapshot(
+  apiSock: string, directory: string, request: BootRequest,
+): Promise<void> {
+  // Load paused. v1.17 stores the original disk path inside the state file.
+  // Replace it with this execution's private copy BEFORE any guest code runs.
+  await apiUpdate(apiSock, "/snapshot/load", {
+    snapshot_path: `${directory}/state`,
+    mem_backend: { backend_type: "File", backend_path: `${directory}/memory` },
+    vsock_override: { uds_path: request.vsockPath },
+    resume_vm: false,
+  });
+  await apiUpdate(apiSock, "/drives/rootfs", {
+    drive_id: "rootfs", path_on_host: request.rootfsPath,
+  }, "PATCH");
+  await apiUpdate(apiSock, "/vm", { state: "Resumed" }, "PATCH");
 }
