@@ -205,6 +205,14 @@ node dist/run.js "Run console.log('hello') in the sandbox and tell me what it pr
 
 The javascript tool is `destructive`. Its `execute` function runs `limactl shell fc -- node … exec -- <source>`. The model never gets a shell on the Mac, and text in its reply is not executed. Only the tool call runs.
 
+## Timing diagnostics
+
+Run the agent with `node dist/run.js --timings --once "Run console.log('hello')"`
+from `agent/`, or set `SANDBOX_TIMINGS=1` in its `.env` file. Logs on stderr
+separate model requests, the tool/Lima round trip, sandbox phases, and the total
+turn duration. Timing data stays outside the model's tool result. The controller
+uses a JSON report so guest stdout and stderr remain intact.
+
 ## What this slice leaves out
 
 The jailer is a second binary shipped with Firecracker. It starts first, chroots the Firecracker process, drops root, and applies a cgroup. The microVM already walls the guest off from the host. The jailer walls a buggy Firecracker process off from the rest of the host. This slice runs `firecracker` directly.

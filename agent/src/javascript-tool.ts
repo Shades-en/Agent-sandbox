@@ -19,8 +19,33 @@ export function cliPath(): string {
 
 // Ari runs on the Mac. Firecracker runs in the Lima VM named fc.
 // limactl shell enters that VM and runs the controller there.
-export function sandboxArgs(cli: string, source: string): string[] {
-  return ["shell", "fc", "--", "node", cli, "exec", "--timeout", "10", "--", source];
+export function sandboxArgs(cli: string, source: string, timings = false): string[] {
+  return ["shell", "fc", "--", "node", cli, "exec", "--timeout", "10",
+    ...(timings ? ["--timings", "--json"] : []), "--", source];
+}
+
+// Timing mode uses a JSON envelope. Do not strip timing-looking lines from
+// guest stderr: a program is allowed to print any text, including those lines.
+export function parseTimingReport(raw: ControllerResult): {
+  result: ControllerResult; timings: Record<string, number>;
+} {
+  if (raw.stderr) throw new Error(raw.stderr);
+  let data: unknown;
+  try { data = JSON.parse(raw.stdout); }
+  catch { throw new Error("sandbox: invalid controller timing report"); }
+  if (!data || typeof data !== "object") throw new Error("sandbox: invalid controller timing report");
+  const report = data as Record<string, unknown>;
+  if (typeof report.stdout !== "string" || typeof report.stderr !== "string" ||
+      !Number.isInteger(report.exitCode) || report.exitCode !== raw.exitCode ||
+      (report.exitCode as number) < 0 || (report.exitCode as number) > 255 ||
+      !report.timings || typeof report.timings !== "object" || Array.isArray(report.timings) ||
+      !Object.values(report.timings).every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    throw new Error("sandbox: invalid controller timing report");
+  }
+  return {
+    result: { stdout: report.stdout, stderr: report.stderr, exitCode: report.exitCode as number },
+    timings: report.timings as Record<string, number>,
+  };
 }
 
 export function interpretControllerResult(result: ControllerResult): ControllerResult {
@@ -56,13 +81,25 @@ export function runLimactl(args: string[]): Promise<ControllerResult> {
 
 export const javascriptTool = defineTool({
   description:
-    "Run JavaScript inside the Firecracker microVM. Node.js executes the source. There is no shell and no network.",
+    "Run JavaScript inside the Firecracker microVM. Use require() for built-in Node modules " +
+    "and an async function for await. There is no shell and no network.",
   input: z.object({
     code: z.string().describe("JavaScript source to run inside the microVM"),
   }),
   effect: "destructive",
   async execute({ code }) {
-    const result = await runLimactl(sandboxArgs(cliPath(), code));
-    return interpretControllerResult(result);
+    const enabled = process.env["SANDBOX_TIMINGS"] === "1";
+    const started = performance.now();
+    try {
+      const raw = await runLimactl(sandboxArgs(cliPath(), code, enabled));
+      if (!enabled) return interpretControllerResult(raw);
+      const { result, timings } = parseTimingReport(raw);
+      for (const [phase, ms] of Object.entries(timings)) {
+        process.stderr.write(`[timing sandbox] ${phase}: ${ms.toFixed(1)} ms\n`);
+      }
+      return interpretControllerResult(result);
+    } finally {
+      if (enabled) process.stderr.write(`[timing agent] lima.roundtrip: ${(performance.now() - started).toFixed(1)} ms\n`);
+    }
   },
 });

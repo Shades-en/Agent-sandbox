@@ -17,6 +17,7 @@ export interface ExecResult {
   stderr: string;
   exitCode: number;
   runDir: string;
+  timings?: Record<string, number>;
 }
 
 export interface FirecrackerHandle {
@@ -35,7 +36,7 @@ export interface ExecEnv {
   spawn: (args: { bin: string; apiSock: string; logPath: string; serialPath: string }) => FirecrackerHandle;
   waitForApi: (apiSock: string, deadline: number) => Promise<void>;
   configure: (apiSock: string, request: BootRequest) => Promise<void>;
-  exchange: (vsockPath: string, command: string, timeoutMs: number) => Promise<ExecResponse>;
+  exchange: (vsockPath: string, command: string, timeoutMs: number, timings?: Record<string, number>) => Promise<ExecResponse>;
   log: (line: string) => void;
 }
 
@@ -119,19 +120,27 @@ export async function execCommand(
   timeoutSec: number,
   overrides: Partial<ExecEnv> = {},
 ): Promise<ExecResult> {
+  const started = performance.now();
+  const timings: Record<string, number> = {};
+  const measure = async <T>(phase: string, operation: () => Promise<T>): Promise<T> => {
+    const start = performance.now();
+    try { return await operation(); }
+    finally { timings[phase] = performance.now() - start; }
+  };
   const env: ExecEnv = { ...defaultEnv(), ...overrides };
   const id = `${process.pid}-${randomBytes(4).toString("hex")}`;
   const runDir = path.join(env.home, "run", id);
-  const base = env.prepare ? await env.prepare() : env.rootfsBase;
+  const base = await measure("snapshot.prepare", async () => env.prepare ? env.prepare() : env.rootfsBase);
   await mkdir(runDir, { recursive: true });
   const rootfsPath = path.join(runDir, "rootfs.ext4");
-  await env.copy(base, rootfsPath);
+  await measure("disk.clone", () => env.copy(base, rootfsPath));
   const apiSock = path.join(runDir, "api.sock");
   const vsockPath = path.join(runDir, "v.sock");
   const logPath = path.join(runDir, "firecracker.log");
   const serialPath = path.join(runDir, "serial.log");
   // Firecracker is idle until we load its snapshot. Its serial console
   // (kernel messages) is redirected into serial.log.
+  const spawnStarted = performance.now();
   const child = env.spawn({
     bin: env.firecrackerBin,
     apiSock,
@@ -140,25 +149,27 @@ export async function execCommand(
   });
   try {
     await child.ready;
-    await env.waitForApi(apiSock, Date.now() + BOOT_TIMEOUT_MS);
-    await env.configure(apiSock, {
+    timings["firecracker.start"] = performance.now() - spawnStarted;
+    await measure("api.ready", () => env.waitForApi(apiSock, Date.now() + BOOT_TIMEOUT_MS));
+    await measure("snapshot.restore", () => env.configure(apiSock, {
       kernelPath: env.kernelPath,
       rootfsPath,
       vsockPath,
-    });
+    }));
     // The guest has resumed. exchange reconnects to its saved vsock listener.
-    const response = await env.exchange(vsockPath, command, timeoutSec * 1000);
+    const response = await env.exchange(vsockPath, command, timeoutSec * 1000, timings);
     return {
       stdout: response.stdout,
       stderr: response.stderr,
       exitCode: response.exitCode,
       runDir,
+      timings,
     };
   } catch (error) {
     // A command that runs too long is a result. A boot that never connects
     // is a thrown error, so the caller can tell the two apart.
     if (error instanceof CommandTimeoutError) {
-      return { stdout: "", stderr: "timeout\n", exitCode: 124, runDir };
+      return { stdout: "", stderr: "timeout\n", exitCode: 124, runDir, timings };
     }
     if (error instanceof Error) {
       error.message = `${error.message}\nserial log: ${serialPath}`;
@@ -166,5 +177,7 @@ export async function execCommand(
     throw error;
   } finally {
     child.kill();
+    // The returned result references this object, including cleanup time.
+    timings["sandbox.total"] = performance.now() - started;
   }
 }

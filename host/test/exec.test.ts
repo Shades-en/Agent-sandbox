@@ -39,6 +39,10 @@ describe("execCommand", () => {
     assert.ok(calls[0].startsWith("copy /snapshot/rootfs.ext4 "));
     assert.equal(result.stdout, "hello\n");
     assert.equal(result.exitCode, 0);
+    for (const phase of ["snapshot.prepare", "disk.clone", "firecracker.start", "api.ready", "snapshot.restore", "sandbox.total"]) {
+      assert.equal(typeof result.timings?.[phase], "number");
+      assert.ok(result.timings![phase] >= 0);
+    }
     assert.equal(killed, true);
     assert.deepEqual(calls.map((call) => call.split(" ")[0]), [
       "copy",

@@ -19,28 +19,31 @@ export function openKvm(kvmPath: string): void {
   fs.closeSync(fd);
 }
 
-export function parseExecArgs(argv: string[]): { timeoutSec: number; command: string } {
-  if (argv[0] !== "exec") {
-    throw new Error("usage: exec [--timeout seconds] -- <command>");
-  }
-  let timeoutSec = DEFAULT_COMMAND_TIMEOUT_SEC;
+interface ExecArgs {
+  timeoutSec: number;
+  command: string;
+  json?: boolean;
+  timings?: boolean;
+}
+
+export function parseExecArgs(argv: string[]): ExecArgs {
+  const usage = "usage: exec [--timeout seconds] [--timings] [--json] -- <JavaScript>";
+  if (argv[0] !== "exec") throw new Error(usage);
+  const options: ExecArgs = { timeoutSec: DEFAULT_COMMAND_TIMEOUT_SEC, command: "" };
   let index = 1;
-  if (argv[index] === "--timeout") {
-    const value = argv[index + 1];
-    if (value === undefined || Number.isNaN(Number(value))) {
-      throw new Error("usage: exec [--timeout seconds] -- <command>");
-    }
-    timeoutSec = Number(value);
-    index += 2;
+  while (argv[index] !== "--") {
+    const option = argv[index++];
+    if (option === "--timeout") {
+      const value = Number(argv[index++]);
+      if (!Number.isFinite(value) || value <= 0) throw new Error(usage);
+      options.timeoutSec = value;
+    } else if (option === "--timings") options.timings = true;
+    else if (option === "--json") options.json = true;
+    else throw new Error(usage);
   }
-  if (argv[index] !== "--") {
-    throw new Error("usage: exec [--timeout seconds] -- <command>");
-  }
-  const command = argv.slice(index + 1).join(" ");
-  if (command.length === 0) {
-    throw new Error("usage: exec [--timeout seconds] -- <command>");
-  }
-  return { timeoutSec, command };
+  options.command = argv.slice(index + 1).join(" ");
+  if (!options.command) throw new Error(usage);
+  return options;
 }
 
 export interface CliIo {
@@ -51,7 +54,7 @@ export interface CliIo {
 }
 
 export async function runCli(argv: string[], io: CliIo): Promise<number> {
-  let parsed: { timeoutSec: number; command: string };
+  let parsed: ExecArgs;
   try {
     parsed = parseExecArgs(argv);
   } catch (error) {
@@ -74,8 +77,19 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
   }
   try {
     const result = await io.exec(parsed.command, parsed.timeoutSec);
-    io.stdout(result.stdout);
-    io.stderr(result.stderr);
+    if (parsed.json) {
+      // Keep guest stderr inside the report. The tool can display diagnostics
+      // separately without ever mistaking a timing line for guest output.
+      io.stdout(`${JSON.stringify(result)}\n`);
+    } else {
+      io.stdout(result.stdout);
+      io.stderr(result.stderr);
+      if (parsed.timings) {
+        for (const [phase, ms] of Object.entries(result.timings ?? {})) {
+          io.stderr(`[timing sandbox] ${phase}: ${ms.toFixed(1)} ms\n`);
+        }
+      }
+    }
     return result.exitCode;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

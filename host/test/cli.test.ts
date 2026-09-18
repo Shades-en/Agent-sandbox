@@ -152,3 +152,29 @@ describe("cli", () => {
     }
   });
 });
+
+
+it("JSON timing mode preserves guest stderr and non-zero exits without diagnostic contamination", async () => {
+  const kvm = path.join(os.tmpdir(), `kvm-json-${process.pid}`);
+  fs.writeFileSync(kvm, "");
+  const result = { stdout: "guest output\n", stderr: "timeout\n", exitCode: 124, runDir: "/run/1", timings: { "sandbox.total": 12 } };
+  const context = io({ kvmPath: kvm, async exec() { return result; } });
+  try {
+    assert.equal(await runCli(["exec", "--timings", "--json", "--timeout", "1", "--", "code"], context), 124);
+    assert.deepEqual(JSON.parse(context.out), result);
+    assert.equal(context.err, "");
+  } finally { fs.unlinkSync(kvm); }
+});
+
+it("direct timing mode logs separately while normal output stays unchanged", async () => {
+  const kvm = path.join(os.tmpdir(), `kvm-timing-${process.pid}`);
+  fs.writeFileSync(kvm, "");
+  try {
+    for (const enabled of [false, true]) {
+      const context = io({ kvmPath: kvm, async exec() { return { stdout: "hello\n", stderr: "", exitCode: 0, runDir: "/run/1", timings: { "disk.clone": 3 } }; } });
+      await runCli(["exec", ...(enabled ? ["--timings"] : []), "--", "code"], context);
+      assert.equal(context.out, "hello\n");
+      assert.equal(context.err, enabled ? "[timing sandbox] disk.clone: 3.0 ms\n" : "");
+    }
+  } finally { fs.unlinkSync(kvm); }
+});

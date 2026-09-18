@@ -152,8 +152,12 @@ export async function connectAndExchange(
   udsPath: string,
   command: string,
   commandTimeoutMs: number,
+  timings?: Record<string, number>,
 ): Promise<ExecResponse> {
+  const connectStarted = performance.now();
   const socket = await connectGuest(udsPath, Date.now() + BOOT_TIMEOUT_MS);
+  if (timings) timings["vsock.connect"] = performance.now() - connectStarted;
+  const executeStarted = performance.now();
   try {
     const frame = encodeFrame({ command });
     await new Promise<void>((resolve, reject) => {
@@ -168,6 +172,7 @@ export async function connectAndExchange(
     const body = await readExact(socket, length, responseDeadline - Date.now());
     return parseExecResponse(decodeFrame(Buffer.concat([header, body])));
   } finally {
+    if (timings) timings["guest.run_and_reply"] = performance.now() - executeStarted;
     socket.destroy();
   }
 }
