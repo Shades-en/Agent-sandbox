@@ -1,4 +1,5 @@
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { createOpenAI } from "@ai-sdk/openai";
@@ -6,6 +7,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createAgent, memorySessionStore } from "ari";
 
 import { javascriptTool } from "./javascript-tool.js";
+import { runConversation } from "./chat.js";
 import { createTurnTimings } from "./timings.js";
 
 // Node does not load .env by itself. This file lives next to package.json.
@@ -54,15 +56,40 @@ const agent = createAgent({
   hooks: timings.hooks,
 });
 
-if (!initialPrompt) {
-  process.stderr.write("usage: node dist/run.js [--timings] [--once] <prompt>\n");
-  process.exit(1);
+const session = await agent.createSession();
+const terminal = Boolean(process.stdin.isTTY && process.stdout.isTTY);
+const readline = once ? undefined : createInterface({
+  input: process.stdin, output: process.stdout, terminal, prompt: "you> ",
+});
+// Subscribe immediately, before the initial model call, so piped or typed
+// follow-ups are buffered while the agent is working.
+const lines = readline?.[Symbol.asyncIterator]() ?? (async function* () {})();
+let stopping = false;
+const stop = () => {
+  if (stopping) return;
+  stopping = true;
+  process.exitCode = 130;
+  readline?.close();
+  void session.halt();
+};
+readline?.on("SIGINT", stop);
+process.on("SIGINT", stop);
+if (!once && terminal) {
+  process.stdout.write("Agent sandbox — /exit or Ctrl+D quits. Conversation memory lasts for this process.\n");
 }
-timings.begin();
 try {
-  const { result } = await agent.complete(initialPrompt);
-  process.stdout.write(`${result.text}\n`);
+  await runConversation(session, lines, {
+    initialPrompt, once, timings,
+    shouldStop: () => stopping,
+    write: (text) => { process.stdout.write(text); },
+    error: (text) => { process.stderr.write(text); },
+    prompt: terminal && readline ? () => { if (!stopping) readline.prompt(); } : undefined,
+  });
+} catch (error) {
+  process.stderr.write(`agent: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
 } finally {
-  timings.end();
+  readline?.close();
+  process.off("SIGINT", stop);
   await agent.close();
 }

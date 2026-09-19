@@ -205,13 +205,62 @@ node dist/run.js "Run console.log('hello') in the sandbox and tell me what it pr
 
 The javascript tool is `destructive`. Its `execute` function runs `limactl shell fc -- node … exec -- <source>`. The model never gets a shell on the Mac, and text in its reply is not executed. Only the tool call runs.
 
-## Timing diagnostics
+## Conversation and timing logs
 
-Run the agent with `node dist/run.js --timings --once "Run console.log('hello')"`
-from `agent/`, or set `SANDBOX_TIMINGS=1` in its `.env` file. Logs on stderr
-separate model requests, the tool/Lima round trip, sandbox phases, and the total
-turn duration. Timing data stays outside the model's tool result. The controller
-uses a JSON report so guest stdout and stderr remain intact.
+Start an interactive conversation from `agent/`:
+
+```bash
+node dist/run.js --timings
+```
+
+Or start with an initial request and then continue at `you>`:
+
+```bash
+node dist/run.js --timings "Run console.log('hello') in the sandbox and tell me what it printed."
+```
+
+The loop reuses one Ari session, so follow-up messages keep the conversation
+history. `/exit`, `/quit`, or Ctrl+D ends the chat. History is held in memory
+and ends when this process exits. Every tool call still gets a new sandbox:
+conversation memory does not preserve guest files or JavaScript variables.
+Ctrl+C requests cancellation and closes the chat.
+
+For one request followed by exit (including scripts/benchmarks), use:
+
+```bash
+node dist/run.js --timings --once "Run console.log('hello') in the sandbox and tell me what it printed."
+```
+
+`--timings` enables terminal diagnostics on stderr. You can also set
+`SANDBOX_TIMINGS=1` in `agent/.env`. Omit both for normal chat output.
+The logs show each model request, the JavaScript tool duration, the Lima
+round trip, and the entire agent turn. Model duration includes the provider
+request, any retries, and generation of its response.
+
+Within the sandbox, the logs separate snapshot preparation (which includes a
+cold build when needed), disk cloning, Firecracker startup, API readiness,
+snapshot restore, vsock connection, and sending code/executing/receiving its result.
+`guest.run_and_reply` includes communication and output handling; it is not a
+measurement of only the JavaScript statement's CPU time.
+
+For example, one measured hello turn took about 3.29 seconds: 1.18 seconds for
+the first model request, 0.97 seconds for the tool including Lima (0.88 seconds
+inside the sandbox), and 1.14 seconds for the model's final reply. A five-second
+agent turn can coexist with a sub-second sandbox execution. These are measured
+boundaries, not a latency guarantee. `tool.javascript` contains `lima.roundtrip`,
+which contains `sandbox.total`; do not add these overlapping totals together.
+
+To measure just the sandbox from the repository root, skipping the model:
+
+```bash
+limactl shell fc -- node "$PWD/host/dist/cli.js" exec --timings --timeout 30 -- 'console.log("hello")'
+```
+
+The tool uses the controller's `--json` report in timing mode so guest stdout
+and stderr stay separate from diagnostics. Timing data is printed locally and
+is not included in the model's tool result. Logs omit prompts, source code,
+model/tool output, and credentials. Normal stdout still contains the actual
+response, including anything you explicitly ask a program to print.
 
 ## What this slice leaves out
 
