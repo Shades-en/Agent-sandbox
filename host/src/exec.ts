@@ -10,6 +10,7 @@ import { firecrackerArgs, restoreSnapshot, type BootRequest } from "./firecracke
 import { CommandTimeoutError, connectAndExchange } from "./vsock.js";
 import { ensureSnapshot } from "./snapshot.js";
 import { assertBtrfsStorage, copyRootfs } from "./storage.js";
+import { createNetwork, NETWORK_HELPER, type NetworkHandle } from "./network.js";
 import type { ExecResponse } from "./frame.js";
 
 export interface ExecResult {
@@ -32,8 +33,9 @@ export interface ExecEnv {
   kernelPath: string;
   rootfsBase: string;
   firecrackerBin: string;
+  openNetwork?: () => Promise<NetworkHandle>;
   copy: (base: string, dest: string) => Promise<void>;
-  spawn: (args: { bin: string; apiSock: string; logPath: string; serialPath: string }) => FirecrackerHandle;
+  spawn: (args: { bin: string; apiSock: string; logPath: string; serialPath: string; network?: NetworkHandle }) => FirecrackerHandle;
   waitForApi: (apiSock: string, deadline: number) => Promise<void>;
   configure: (apiSock: string, request: BootRequest) => Promise<void>;
   exchange: (vsockPath: string, command: string, timeoutMs: number, timings?: Record<string, number>) => Promise<ExecResponse>;
@@ -65,11 +67,12 @@ function spawnFirecracker(args: {
   apiSock: string;
   logPath: string;
   serialPath: string;
+  network?: NetworkHandle;
 }): FirecrackerHandle {
   const serial = fs.openSync(args.serialPath, "a");
   const child: ChildProcess = spawn(
-    args.bin,
-    firecrackerArgs(args.apiSock, args.logPath),
+    args.network ? "sudo" : args.bin,
+    args.network ? ["-n", NETWORK_HELPER, "run", args.network.id, args.bin, ...firecrackerArgs(args.apiSock, args.logPath)] : firecrackerArgs(args.apiSock, args.logPath),
     { stdio: ["ignore", serial, serial] },
   );
   fs.closeSync(serial);
@@ -80,7 +83,10 @@ function spawnFirecracker(args: {
     });
   });
   return {
-    kill: () => child.kill("SIGKILL"),
+    kill: () => {
+      // The root helper terminates the namespaced VMM during release.
+      if (!args.network) child.kill("SIGKILL");
+    },
     ready,
   };
 }
@@ -95,6 +101,7 @@ export function defaultEnv(): ExecEnv {
     rootfsBase: path.join(home, "images", "rootfs.ext4"),
     firecrackerBin: path.join(base, "bin", "firecracker"),
     copy: copyRootfs,
+    openNetwork: createNetwork,
     spawn: spawnFirecracker,
     waitForApi: waitForSocket,
     async prepare() {
@@ -140,14 +147,13 @@ export async function execCommand(
   const serialPath = path.join(runDir, "serial.log");
   // Firecracker is idle until we load its snapshot. Its serial console
   // (kernel messages) is redirected into serial.log.
+  const network = await measure("network.create", async () => env.openNetwork?.());
   const spawnStarted = performance.now();
-  const child = env.spawn({
-    bin: env.firecrackerBin,
-    apiSock,
-    logPath,
-    serialPath,
-  });
+  let child: FirecrackerHandle | undefined;
   try {
+    child = env.spawn({
+      bin: env.firecrackerBin, apiSock, logPath, serialPath, network,
+    });
     await child.ready;
     timings["firecracker.start"] = performance.now() - spawnStarted;
     await measure("api.ready", () => env.waitForApi(apiSock, Date.now() + BOOT_TIMEOUT_MS));
@@ -155,6 +161,7 @@ export async function execCommand(
       kernelPath: env.kernelPath,
       rootfsPath,
       vsockPath,
+      network,
     }));
     // The guest has resumed. exchange reconnects to its saved vsock listener.
     const response = await env.exchange(vsockPath, command, timeoutSec * 1000, timings);
@@ -176,7 +183,8 @@ export async function execCommand(
     }
     throw error;
   } finally {
-    child.kill();
+    child?.kill();
+    await measure("network.cleanup", async () => network?.release());
     // The returned result references this object, including cleanup time.
     timings["sandbox.total"] = performance.now() - started;
   }

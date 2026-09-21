@@ -3,11 +3,12 @@
 
 systemd starts this at boot inside the microVM. It accepts one vsock
 connection, feeds that payload to an already-running Node.js process, writes
-the result back, and exits. There is no shell. The guest has no IP address.
-vsock is the only way the Lima host reaches it.
+the result back, and exits. There is no shell. The guest has outbound HTTPS/DNS, filtered by the host.
+The controller sends code and receives results over vsock.
 """
 
 import json
+import fcntl
 import os
 import select
 import shutil
@@ -175,15 +176,18 @@ def _read_capped_output(proc: subprocess.Popen) -> tuple[bytes, bytes, bool]:
     return bytes(stdout_buf), bytes(stderr_buf), truncated
 
 
-def start_runtime() -> subprocess.Popen:
+def start_runtime(require_reseed: bool = False) -> subprocess.Popen:
     # Start Node BEFORE the snapshot, not after a tool call arrives.
     node = shutil.which("node")
     if node is None:
         raise FileNotFoundError("node is not installed")
+    environment = {"PATH": GUEST_PATH, "NODE_NO_WARNINGS": "1"}
+    if require_reseed:
+        environment["SANDBOX_RESEED_MODULE"] = str(Path(__file__).with_name("reseed.node"))
     proc = subprocess.Popen(
         [node, str(Path(__file__).with_name("runtime.cjs"))],
         cwd="/",
-        env={"PATH": GUEST_PATH, "NODE_NO_WARNINGS": "1"},
+        env=environment,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -205,13 +209,14 @@ def start_runtime() -> subprocess.Popen:
     return proc
 
 
-def run_command(source: str, proc: subprocess.Popen | None = None) -> dict:
+def run_command(source: str, proc: subprocess.Popen | None = None, entropy: str | None = None) -> dict:
     # Production passes the process saved in the snapshot. Tests may start a
     # fresh runtime here without needing a microVM.
     if proc is None:
         proc = start_runtime()
     assert proc.stdin is not None
-    proc.stdin.write(source.encode("utf-8"))
+    packet = {"code": source, "entropy": entropy or os.urandom(64).hex()}
+    proc.stdin.write(json.dumps(packet, ensure_ascii=False).encode("utf-8"))
     proc.stdin.close()
     raw_out, raw_err, truncated = _read_capped_output(proc)
     stdout, out_cut = cap_text(raw_out.decode("utf-8", errors="replace"))
@@ -249,13 +254,25 @@ def handle(conn: socket.socket, runtime: subprocess.Popen) -> None:
     command = request["command"]
     if not isinstance(command, str):
         raise ValueError("command missing")
-    conn.sendall(encode_frame(run_command(command, runtime)))
+    entropy = request.get("entropy")
+    if not isinstance(entropy, str) or len(entropy) != 128:
+        raise ValueError("fresh host entropy missing")
+    seed = bytes.fromhex(entropy)
+    # Also refresh Linux random state, which was cloned along with Node.
+    with open("/dev/urandom", "wb", buffering=0) as rng:
+        rng.write(seed)
+        fcntl.ioctl(rng, 0x5207)  # RNDRESEEDCRNG on Linux.
+    conn.sendall(encode_frame(run_command(command, runtime, entropy)))
 
 
 def main() -> None:
     # AF_VSOCK is the guest kernel's vsock socket family. VMADDR_CID_ANY
     # means "this VM". The Lima host reaches it as context id 3, port 5000.
-    runtime = start_runtime()
+    # Identical guest addresses are safe because each VMM has its own network namespace.
+    subprocess.run(["ip", "link", "set", "eth0", "up"], check=True)
+    subprocess.run(["ip", "addr", "replace", "172.30.0.2/30", "dev", "eth0"], check=True)
+    subprocess.run(["ip", "route", "replace", "default", "via", "172.30.0.1"], check=True)
+    runtime = start_runtime(require_reseed=True)
     server = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
     try:
         server.bind((socket.VMADDR_CID_ANY, PORT))

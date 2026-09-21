@@ -19,9 +19,9 @@ export async function snapshotKey(env: ExecEnv): Promise<string> {
       return [file, info.size, info.mtimeMs, info.ctimeMs, info.ino];
     }),
   );
-  // Format 2 requires a waiting Node runtime, not just a Python listener.
+  // Format 4 includes networking and per-restore cryptographic reseeding.
   return createHash("sha256").update(JSON.stringify({
-    format: 2, inputs, arch: os.arch(), kernel: os.release(), cpu: os.cpus()[0]?.model,
+    format: 4, inputs, arch: os.arch(), kernel: os.release(), cpu: os.cpus()[0]?.model,
     BOOT_ARGS, GUEST_CID, MEM_SIZE_MIB, VCPU_COUNT,
   })).digest("hex").slice(0, 20);
 }
@@ -81,16 +81,18 @@ export async function ensureSnapshot(env: ExecEnv): Promise<string> {
     const apiSock = path.join(directory, "api.sock");
     const serialPath = path.join(directory, "serial.log");
     await env.copy(env.rootfsBase, rootfsPath);
-    const child = env.spawn({
-      bin: env.firecrackerBin, apiSock, serialPath,
-      logPath: path.join(directory, "firecracker.log"),
-    });
+    const network = await env.openNetwork?.();
+    let child;
     try {
+      child = env.spawn({
+        bin: env.firecrackerBin, apiSock, serialPath,
+        logPath: path.join(directory, "firecracker.log"), network,
+      });
       await child.ready;
       await env.waitForApi(apiSock, Date.now() + 15_000);
       await configureAndStart(apiSock, {
         kernelPath: env.kernelPath, rootfsPath,
-        vsockPath: path.join(directory, "v.sock"),
+        vsockPath: path.join(directory, "v.sock"), network,
       });
       // Do not probe vsock: the guest accepts just one connection. Read its
       // serial marker instead, then freeze memory and disk at the same point.
@@ -107,7 +109,8 @@ export async function ensureSnapshot(env: ExecEnv): Promise<string> {
       }
       throw error;
     } finally {
-      child.kill();
+      child?.kill();
+      await network?.release();
     }
     return directory;
   } finally {

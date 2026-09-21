@@ -1,4 +1,5 @@
 import http from "node:http";
+import { GUEST_MAC } from "./network.js";
 
 import { BOOT_ARGS, GUEST_CID, MEM_SIZE_MIB, VCPU_COUNT } from "./constants.js";
 
@@ -17,6 +18,7 @@ export interface BootRequest {
   kernelPath: string;
   rootfsPath: string;
   vsockPath: string;
+  network?: { hostDevName: string };
 }
 
 export interface ApiCall {
@@ -26,7 +28,7 @@ export interface ApiCall {
 
 // Firecracker is configured before the guest boots. Each call is an HTTP PUT
 // on the API socket. A 204 means "accepted". The guest starts only on the
-// last call. There is no network interface in this slice.
+// last call. The network interface is attached to this VM's isolated TAP.
 export function bootCalls(request: BootRequest): ApiCall[] {
   return [
     {
@@ -56,6 +58,10 @@ export function bootCalls(request: BootRequest): ApiCall[] {
       path: "/vsock",
       body: { guest_cid: GUEST_CID, uds_path: request.vsockPath },
     },
+    ...(request.network ? [{
+      path: "/network-interfaces/eth0",
+      body: { iface_id: "eth0", host_dev_name: request.network.hostDevName, guest_mac: GUEST_MAC },
+    }] : []),
     {
       // Start the vCPUs. Everything above must already be configured.
       path: "/actions",
@@ -162,6 +168,7 @@ export async function restoreSnapshot(
     mem_backend: { backend_type: "File", backend_path: `${directory}/memory` },
     vsock_override: { uds_path: request.vsockPath },
     resume_vm: false,
+    ...(request.network ? { network_overrides: [{ iface_id: "eth0", host_dev_name: request.network.hostDevName }] } : {}),
   });
   await apiUpdate(apiSock, "/drives/rootfs", {
     drive_id: "rootfs", path_on_host: request.rootfsPath,

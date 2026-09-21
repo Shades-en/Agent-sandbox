@@ -37,7 +37,8 @@ describe("vsock handshake", () => {
         const length = buf.readUInt32BE(0);
         if (buf.length < 4 + length) return;
         const payload = decodeFrame(buf.subarray(0, 4 + length));
-        assert.deepEqual(payload, { command: "echo hello" });
+        assert.equal((payload as { command: string }).command, "echo hello");
+        assert.match((payload as { entropy: string }).entropy, /^[a-f0-9]{128}$/);
         socket.end(
           encodeFrame({
             stdout: "hello\n",
@@ -76,7 +77,7 @@ describe("vsock handshake", () => {
         if (buf.length < 4) return;
         const length = buf.readUInt32BE(0);
         if (buf.length < 4 + length) return;
-        assert.deepEqual(decodeFrame(buf.subarray(0, 4 + length)), { command: "echo split" });
+        assert.equal((decodeFrame(buf.subarray(0, 4 + length)) as { command: string }).command, "echo split");
         const response = encodeFrame({
           stdout: "split\n",
           stderr: "",
@@ -114,7 +115,7 @@ describe("vsock handshake", () => {
         if (buf.length < 4) return;
         const length = buf.readUInt32BE(0);
         if (buf.length < 4 + length) return;
-        assert.deepEqual(decodeFrame(buf.subarray(0, 4 + length)), { command: "echo later" });
+        assert.equal((decodeFrame(buf.subarray(0, 4 + length)) as { command: string }).command, "echo later");
         setImmediate(() =>
           socket.end(
             encodeFrame({
@@ -154,7 +155,7 @@ describe("vsock handshake", () => {
         if (buf.length < 4) return;
         const length = buf.readUInt32BE(0);
         if (buf.length < 4 + length) return;
-        assert.deepEqual(decodeFrame(buf.subarray(0, 4 + length)), { command: "echo big" });
+        assert.equal((decodeFrame(buf.subarray(0, 4 + length)) as { command: string }).command, "echo big");
         const badHeader = Buffer.alloc(4);
         badHeader.writeUInt32BE(MAX_FRAME_BYTES + 1, 0);
         socket.end(badHeader);

@@ -13,6 +13,7 @@ describe("execCommand", () => {
     let killed = false;
     const result = await execCommand("echo hello", 10, {
       async prepare() { return "/snapshot/rootfs.ext4"; },
+      openNetwork: undefined,
       home: "/tmp/sandbox",
       kernelPath: "/images/vmlinux",
       rootfsBase: "/images/rootfs.ext4",
@@ -57,6 +58,7 @@ describe("execCommand", () => {
     let killed = false;
     const result = await execCommand("sleep 30", 1, {
       prepare: undefined,
+      openNetwork: undefined,
       home: "/tmp/sandbox",
       kernelPath: "/k",
       rootfsBase: "/r",
@@ -83,6 +85,7 @@ describe("execCommand", () => {
     await assert.rejects(
       () => execCommand("echo", 10, {
         prepare: undefined,
+        openNetwork: undefined,
         home,
         kernelPath: "/k",
         rootfsBase: "/r",
@@ -114,6 +117,7 @@ describe("execCommand", () => {
     await assert.rejects(
       () => execCommand("echo", 10, {
         prepare: undefined,
+        openNetwork: undefined,
         home,
         kernelPath: "/k",
         rootfsBase: "/r",
@@ -148,4 +152,31 @@ describe("execCommand", () => {
     );
     assert.equal(killed, true);
   });
+});
+
+
+it("releases networking on failed configuration, failed spawn, and timeout", async () => {
+  for (const failure of ["configure", "spawn", "timeout"]) {
+    const home = await mkdtemp(path.join(os.tmpdir(), "exec-network-"));
+    let released = 0;
+    const work = execCommand("code", 1, {
+      home, prepare: undefined,
+      async copy() {},
+      async openNetwork() { return { id: "1234abcd", hostDevName: "tap0", async release() { released++; } }; },
+      spawn(args) {
+        assert.equal(args.network?.id, "1234abcd");
+        if (failure === "spawn") throw new Error("spawn failed");
+        return { ready: Promise.resolve(), kill() {} };
+      },
+      async waitForApi() {},
+      async configure(_socket, request) {
+        assert.equal(request.network?.hostDevName, "tap0");
+        if (failure === "configure") throw new Error("configure failed");
+      },
+      async exchange() { throw new CommandTimeoutError(); },
+    });
+    if (failure === "timeout") assert.equal((await work).exitCode, 124);
+    else await assert.rejects(work, new RegExp(failure + " failed"));
+    assert.equal(released, 1);
+  }
 });

@@ -29,7 +29,7 @@ describe("firecracker api", () => {
     assert.deepEqual(calls[0]?.body, { vcpu_count: 1, mem_size_mib: 256, smt: false });
     assert.deepEqual(calls[1]?.body, {
       kernel_image_path: "/images/vmlinux",
-      boot_args: "keep_bootcon console=ttyS0 reboot=k panic=1",
+      boot_args: "keep_bootcon console=ttyS0 reboot=k panic=1 net.ifnames=0 ipv6.disable=1",
     });
     assert.deepEqual(calls[2]?.body, {
       drive_id: "rootfs",
@@ -107,4 +107,13 @@ describe("firecracker api", () => {
       server.close();
     }
   });
+});
+
+it("attaches the network before boot with the MAC saved in the snapshot", () => {
+  const calls = bootCalls({ kernelPath: "/k", rootfsPath: "/r", vsockPath: "/v", network: { hostDevName: "tap0" } });
+  assert.deepEqual(calls.at(-2), {
+    path: "/network-interfaces/eth0",
+    body: { iface_id: "eth0", host_dev_name: "tap0", guest_mac: "02:fc:00:00:00:01" },
+  });
+  assert.equal(calls.at(-1)?.path, "/actions");
 });

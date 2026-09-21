@@ -16,4 +16,4 @@ export const GUEST_CID = 3;
 export const MEM_SIZE_MIB = 256;
 export const VCPU_COUNT = 1;
 // Kernel arguments. keep_bootcon and console=ttyS0 send boot text to serial.log.
-export const BOOT_ARGS = "keep_bootcon console=ttyS0 reboot=k panic=1";
+export const BOOT_ARGS = "keep_bootcon console=ttyS0 reboot=k panic=1 net.ifnames=0 ipv6.disable=1";

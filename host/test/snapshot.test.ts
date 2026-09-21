@@ -26,12 +26,13 @@ test("restore loads paused, switches disk, then resumes on a private vsock path"
   await new Promise<void>((resolve) => server.listen(sock, resolve));
   try {
     await restoreSnapshot(sock, "/saved", {
-      rootfsPath: "/run/disk", vsockPath: "/run/v.sock", kernelPath: "/unused",
+      rootfsPath: "/run/disk", vsockPath: "/run/v.sock", kernelPath: "/unused", network: { hostDevName: "tap0" },
     });
     assert.deepEqual(calls, [
       ["PUT", "/snapshot/load", {
         snapshot_path: "/saved/state", mem_backend: { backend_type: "File", backend_path: "/saved/memory" },
         vsock_override: { uds_path: "/run/v.sock" }, resume_vm: false,
+        network_overrides: [{ iface_id: "eth0", host_dev_name: "tap0" }],
       }],
       ["PATCH", "/drives/rootfs", { drive_id: "rootfs", path_on_host: "/run/disk" }],
       ["PATCH", "/vm", { state: "Resumed" }],
@@ -59,7 +60,7 @@ test("one clean snapshot is built, concurrent callers reuse it, and changed imag
   let serial = "";
   let fail = false;
   const env = {
-    ...defaultEnv(), home, kernelPath: files[0], rootfsBase: files[1], firecrackerBin: files[2],
+    ...defaultEnv(), openNetwork: undefined, home, kernelPath: files[0], rootfsBase: files[1], firecrackerBin: files[2],
     async copy(_base: string, dest: string) { await writeFile(dest, "boot-disk"); },
     spawn(args: { apiSock: string; serialPath: string }) {
       boots++;

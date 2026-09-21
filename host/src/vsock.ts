@@ -1,4 +1,5 @@
 import net from "node:net";
+import { randomBytes } from "node:crypto";
 
 import { BOOT_TIMEOUT_MS, MAX_FRAME_BYTES, VSOCK_PORT } from "./constants.js";
 import {
@@ -159,7 +160,7 @@ export async function connectAndExchange(
   if (timings) timings["vsock.connect"] = performance.now() - connectStarted;
   const executeStarted = performance.now();
   try {
-    const frame = encodeFrame({ command });
+    const frame = encodeFrame({ command, entropy: randomBytes(64).toString("hex") });
     await new Promise<void>((resolve, reject) => {
       socket.write(frame, (error) => (error ? reject(error) : resolve()));
     });
