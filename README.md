@@ -1,6 +1,6 @@
 # Agent sandbox
 
-An Ari agent runs JavaScript inside a Firecracker microVM. Node.js executes the source. The guest has no shell and no network, so the program cannot see the Mac or the Lima VM's files.
+An Ari agent runs JavaScript directly inside a fresh Firecracker microVM. Node.js executes the source. The guest can fetch public HTTPS APIs; unsolicited ingress and private-network access are blocked. Guest files and memory are isolated from the Mac and the Lima VM.
 
 ## Three places
 
@@ -27,28 +27,29 @@ After a Mac reboot, `fc` is stopped and its disk is still at `~/.lima/fc`. Start
 
 ## The API socket
 
-`scripts/setup-host.sh` downloads Firecracker v1.17.0, a guest kernel, and an Ubuntu root disk. It installs `guest/agent.py` into that disk, enables `sandbox-agent.service`, and installs Node.js on the disk. A command inside the microVM can run `node`. The guest has no network, so `npm` cannot download packages.
+`scripts/setup-host.sh` downloads Firecracker v1.17.0, a guest kernel, and an Ubuntu root disk. It installs `guest/agent.py` into that disk, enables `sandbox-agent.service`, and installs Node.js on the disk. A command inside the microVM can run `node`. The guest has filtered outbound HTTPS access.
 
 ```bash
 limactl shell fc -- ./scripts/setup-host.sh
 cd host && pnpm install && pnpm build
 ```
 
-`node host/dist/cli.js exec` starts `firecracker` with `--api-sock`. The socket speaks HTTP. To build the initial snapshot, the controller PUTs five documents, in order:
+`node host/dist/cli.js exec` starts `firecracker` with `--api-sock`. The socket speaks HTTP. To build the initial snapshot, the controller PUTs six documents, in order:
 
 1. `/machine-config` — 1 vCPU, 256 MiB, SMT off
 2. `/boot-source` — the kernel and `keep_bootcon console=ttyS0 reboot=k panic=1`
 3. `/drives/rootfs` — a fresh copy of the root disk, marked as the root device
 4. `/vsock` — guest context id 3, Unix socket path for the host side
-5. `/actions` — `InstanceStart`
+5. `/network-interfaces/eth0` — network card attached to the private namespace's TAP
+6. `/actions` — `InstanceStart`
 
-A successful PUT returns HTTP 204. The guest has no network interface.
+A successful PUT returns HTTP 204. Firewall rules are installed before the guest runs.
 
 ## vsock
 
 The guest reaches the host with a context id and a port. The host's context id is 2. This guest's context id is 3. The agent listens on port 5000.
 
-Bytes move through a virtio ring: a shared-memory queue the guest kernel fills and Firecracker reads. Nothing is wrapped in an IP packet. The guest has no address to dial.
+Bytes move through a virtio ring: a shared-memory queue the guest kernel fills and Firecracker reads. Code and results use this local channel without IP packets. Internet requests use the separate virtual network card.
 
 On the host, Firecracker exposes that device as a Unix socket. The controller connects and sends:
 
@@ -94,7 +95,7 @@ The snapshot lives inside Lima at `~/.sandbox/storage/snapshots/<key>/`:
 
 Each execution reflink-clones that saved disk into its own run directory, starts a fresh
 Firecracker process, and calls `PUT /snapshot/load` with `resume_vm: false`.
-It overrides the vsock path, switches the root drive to the private disk with
+It overrides the vsock and network TAP paths, switches the root drive to the private disk with
 `PATCH /drives/rootfs`, and only then resumes with `PATCH /vm`.
 Memory writes are private to that restored VM. It is destroyed after one execution;
 files and processes from earlier executions do not carry over. No VM pool is used.
@@ -132,6 +133,79 @@ path and a reminder to rebuild the guest image.
 
 See [Firecracker snapshot documentation](https://github.com/firecracker-microvm/firecracker/blob/v1.17.0/docs/snapshotting/snapshot-support.md)
 for the API and snapshot lifecycle.
+
+## Outbound fetch access
+
+Use normal Node `fetch()` inside an async function:
+
+```js
+(async () => {
+  const response = await fetch("https://example.com", {
+    signal: AbortSignal.timeout(8000),
+  });
+  console.log(response.status);
+  console.log((await response.text()).slice(0, 100));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+```
+
+The guest uses IPv4 address `172.30.0.2`, gateway `172.30.0.1`, and public DNS
+resolvers `1.1.1.1` and `8.8.8.8`. Each VMM runs in its own Linux network namespace,
+so concurrent clones can use the same guest IP and MAC. Its TAP device connects
+to a distinct veth uplink; namespace NAT and host NAT carry requests through `fc`.
+Snapshot loading maps `eth0` onto that execution's TAP with `network_overrides`.
+The host TAP MAC is fixed so saved guest neighbor entries stay valid.
+
+The host firewall permits public-destination TCP port 443 (normally HTTPS), and
+TCP/UDP DNS on port 53 to those two resolvers. Replies to permitted connections
+are allowed. Plain HTTP/port 80, other outbound ports, private/link-local/
+metadata/multicast destinations, traffic to `fc`, cross-guest traffic, IPv6, and
+unsolicited inbound connections are blocked. Rules filter packet destination IPs,
+so resolving a hostname or following a redirect to a private IP does not bypass
+the restriction. This is a network-layer policy, not a domain allowlist or TLS proxy.
+
+Full host setup installs a root-owned helper at
+`/usr/local/libexec/agent-sandbox-network` and enables the
+`agent-sandbox-network.service` systemd unit. This service reinstalls only the
+project's firewall table and enables forwarding after a restart, without flushing
+Lima's other rules. The controller calls the helper using passwordless sudo
+inside this development Lima VM. The helper enters the namespace, then drops to
+the regular Lima user and removes capabilities before launching Firecracker.
+API sockets, disk files, and vsock remain accessible through their normal paths.
+Namespaces, interfaces, and their connection-tracking entries are removed on
+completion, error, and timeout. Up to 256 concurrent network allocations are supported.
+
+Run setup once after updating the code:
+
+```bash
+pnpm --dir host build
+limactl shell fc -- ./scripts/setup-host.sh
+```
+
+This rebuilds the guest, configures public DNS, includes Node's HTTPS trust
+support, and creates a new network-enabled snapshot on the next execution.
+`scripts/setup-network.sh` can reinstall the host helper and service separately;
+guest updates still require full host setup. No API credentials are supplied
+implicitly: authenticated APIs need keys passed deliberately by the application.
+
+A snapshot clones RNG state too. Each execution now gets 64 fresh random bytes
+from `fc` over vsock. Before executing source, the guest refreshes Linux RNG state
+and a small N-API addon reseeds Node's own OpenSSL generator. The addon is built
+from `guest/reseed.cc` with the pinned Node headers during setup. It intentionally
+resolves OpenSSL symbols from Node instead of linking another libcrypto.
+`Math.random()` uses that reseeded generator rather than replaying V8's saved
+random cache. Network-enabled snapshots are taken before any user code or API
+connections exist. This avoids reusing random values or open TLS connections
+across clean clones.
+
+Live networking checks (inside `fc`, after setup and build):
+
+```bash
+limactl shell fc -- python3 scripts/test-network.py
+```
+
+They exercise public HTTPS/DNS, blocked destinations and ports, concurrent
+executions, distinct RNG output, a guest server rejecting unsolicited ingress,
+and namespace cleanup after normal completion and timeout.
 
 ## Disk storage: cheap private clones
 

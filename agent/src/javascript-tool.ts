@@ -82,7 +82,7 @@ export function runLimactl(args: string[]): Promise<ControllerResult> {
 export const javascriptTool = defineTool({
   description:
     "Run JavaScript inside the Firecracker microVM. Use require() for built-in Node modules " +
-    "and an async function for await. There is no shell and no network.",
+    "and an async function for await. fetch() can reach public HTTPS endpoints on port 443. Plain HTTP, private networks, and unsolicited inbound connections are blocked.",
   input: z.object({
     code: z.string().describe("JavaScript source to run inside the microVM"),
   }),

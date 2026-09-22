@@ -51,7 +51,7 @@ const agent = createAgent({
   store: memorySessionStore(),
   instructions:
     "You run JavaScript inside a Firecracker microVM by calling the javascript tool. " +
-    "Node.js executes the source. There is no shell and no network. Report what it printed.",
+    "Node.js executes the source. Outbound HTTPS fetch and public DNS work; plain HTTP, private networks, and inbound connections are blocked. Use an async function for fetch and report what it printed.",
   tools: { javascript: javascriptTool },
   hooks: timings.hooks,
 });
