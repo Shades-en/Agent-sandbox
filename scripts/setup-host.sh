@@ -64,7 +64,7 @@ if [[ ! -f "$MANIFEST" ]]; then
 fi
 
 FC_TGZ="${WORK}/firecracker-${VER}-aarch64.tgz"
-if [[ ! -x "${BIN}/firecracker" ]]; then
+if [[ ! -x "${BIN}/firecracker" || ! -x "${WORK}/release-${VER}-aarch64/jailer-${VER}-aarch64" ]]; then
   curl -fsSL -o "$FC_TGZ" \
     "https://github.com/firecracker-microvm/firecracker/releases/download/${VER}/firecracker-${VER}-aarch64.tgz"
   echo "${SHA}  ${FC_TGZ}" | sha256sum -c -

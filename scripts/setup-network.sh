@@ -7,7 +7,18 @@ if [[ "$(uname -s)" != Linux ]]; then
 fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 sudo apt-get update
-sudo apt-get install -y iproute2 nftables conntrack
+sudo apt-get install -y iproute2 nftables conntrack acl
+# Install a matching, root-owned Firecracker/jailer pair. The jailer must
+# never execute a binary from a directory writable by an unprivileged user.
+RELEASE="$HOME/.sandbox/work/release-v1.17.0-aarch64"
+if [[ ! -x "$RELEASE/jailer-v1.17.0-aarch64" ]]; then
+  echo 'Missing matching release binaries; run scripts/setup-host.sh inside fc.' >&2
+  exit 1
+fi
+sudo install -d -m 755 /usr/local/lib/agent-sandbox
+sudo install -m 755 "$RELEASE/firecracker-v1.17.0-aarch64" /usr/local/lib/agent-sandbox/firecracker
+sudo install -m 755 "$RELEASE/jailer-v1.17.0-aarch64" /usr/local/lib/agent-sandbox/jailer
+sudo install -m 644 "$HOME/.sandbox/images/vmlinux" /usr/local/lib/agent-sandbox/vmlinux
 sudo install -D -m 755 "$ROOT/scripts/network-helper.py" /usr/local/libexec/agent-sandbox-network
 sudo tee /etc/systemd/system/agent-sandbox-network.service >/dev/null <<'UNIT'
 [Unit]

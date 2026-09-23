@@ -19,6 +19,7 @@ export interface BootRequest {
   rootfsPath: string;
   vsockPath: string;
   network?: { hostDevName: string };
+  jailed?: boolean;
 }
 
 export interface ApiCall {
@@ -30,6 +31,8 @@ export interface ApiCall {
 // on the API socket. A 204 means "accepted". The guest starts only on the
 // last call. The network interface is attached to this VM's isolated TAP.
 export function bootCalls(request: BootRequest): ApiCall[] {
+  // Only these files exist inside the jail; host paths stay outside it.
+  if (request.jailed) request = { ...request, kernelPath: "/kernel", rootfsPath: "/sandbox/rootfs.ext4", vsockPath: "/sandbox/v.sock" };
   return [
     {
       // CPU and memory. smt off means one thread per vCPU.
@@ -161,17 +164,20 @@ export async function apiUpdate(
 export async function restoreSnapshot(
   apiSock: string, directory: string, request: BootRequest,
 ): Promise<void> {
+  const saved = request.jailed ? "/snapshot" : directory;
+  const disk = request.jailed ? "/sandbox/rootfs.ext4" : request.rootfsPath;
+  const vsock = request.jailed ? "/sandbox/v.sock" : request.vsockPath;
   // Load paused. v1.17 stores the original disk path inside the state file.
   // Replace it with this execution's private copy BEFORE any guest code runs.
   await apiUpdate(apiSock, "/snapshot/load", {
-    snapshot_path: `${directory}/state`,
-    mem_backend: { backend_type: "File", backend_path: `${directory}/memory` },
-    vsock_override: { uds_path: request.vsockPath },
+    snapshot_path: `${saved}/state`,
+    mem_backend: { backend_type: "File", backend_path: `${saved}/memory` },
+    vsock_override: { uds_path: vsock },
     resume_vm: false,
     ...(request.network ? { network_overrides: [{ iface_id: "eth0", host_dev_name: request.network.hostDevName }] } : {}),
   });
   await apiUpdate(apiSock, "/drives/rootfs", {
-    drive_id: "rootfs", path_on_host: request.rootfsPath,
+    drive_id: "rootfs", path_on_host: disk,
   }, "PATCH");
   await apiUpdate(apiSock, "/vm", { state: "Resumed" }, "PATCH");
 }

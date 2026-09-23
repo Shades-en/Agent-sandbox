@@ -19,9 +19,9 @@ export async function snapshotKey(env: ExecEnv): Promise<string> {
       return [file, info.size, info.mtimeMs, info.ctimeMs, info.ino];
     }),
   );
-  // Format 4 includes networking and per-restore cryptographic reseeding.
+  // Format 5 records jail-relative disk paths, independent of any host path.
   return createHash("sha256").update(JSON.stringify({
-    format: 4, inputs, arch: os.arch(), kernel: os.release(), cpu: os.cpus()[0]?.model,
+    format: 5, inputs, arch: os.arch(), kernel: os.release(), cpu: os.cpus()[0]?.model,
     BOOT_ARGS, GUEST_CID, MEM_SIZE_MIB, VCPU_COUNT,
   })).digest("hex").slice(0, 20);
 }
@@ -86,21 +86,21 @@ export async function ensureSnapshot(env: ExecEnv): Promise<string> {
     try {
       child = env.spawn({
         bin: env.firecrackerBin, apiSock, serialPath,
-        logPath: path.join(directory, "firecracker.log"), network,
+        logPath: path.join(directory, "firecracker.log"), network, boot: true,
       });
       await child.ready;
       await env.waitForApi(apiSock, Date.now() + 15_000);
       await configureAndStart(apiSock, {
         kernelPath: env.kernelPath, rootfsPath,
-        vsockPath: path.join(directory, "v.sock"), network,
+        vsockPath: path.join(directory, "v.sock"), network, jailed: !!network,
       });
       // Do not probe vsock: the guest accepts just one connection. Read its
       // serial marker instead, then freeze memory and disk at the same point.
       await waitForGuestReady(serialPath);
       await apiUpdate(apiSock, "/vm", { state: "Paused" }, "PATCH");
       await apiUpdate(apiSock, "/snapshot/create", {
-        snapshot_type: "Full", snapshot_path: path.join(directory, "state"),
-        mem_file_path: path.join(directory, "memory"),
+        snapshot_type: "Full", snapshot_path: network ? "/sandbox/state" : path.join(directory, "state"),
+        mem_file_path: network ? "/sandbox/memory" : path.join(directory, "memory"),
       });
       await writeFile(path.join(directory, "ready"), "Snapshot contains no user code.\n");
     } catch (error) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Root-owned helper inside fc. Only manages this project's network resources.
+"""Root-owned helper inside fc. Manages this project's network and jail resources.
 
 Each guest sees the same tiny subnet, isolated in a separate network namespace.
 Its uplink gets a distinct address; NAT carries HTTPS/DNS out through fc.
@@ -9,12 +9,18 @@ import json
 import os
 from pathlib import Path
 import pwd
+import grp
 import re
 import signal
+import shutil
+import time
 import subprocess
 import sys
 
 STATE = Path("/run/agent-sandbox-network")
+BIN = Path("/usr/local/lib/agent-sandbox")
+JAILS = Path("/srv/agent-sandbox")
+CGROUP = Path("/sys/fs/cgroup/agent-sandbox")
 BLOCKED = "0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4"
 DNS = "1.1.1.1, 8.8.8.8"
 GUEST = "172.30.0.2"
@@ -73,6 +79,19 @@ def setup():
         raise ValueError("Unsupported uplink interface name")
     run("nft", "-f", "-", input=root_rules(uplink))
     run("sysctl", "-q", "-w", "net.ipv4.ip_forward=1")
+    # Enable the controllers used by the jailer. The parent stays process-free.
+    for parent in (Path("/sys/fs/cgroup"), CGROUP):
+        parent.mkdir(exist_ok=True)
+        (parent / "cgroup.subtree_control").write_text("+cpu +memory +pids")
+    JAILS.mkdir(mode=0o700, exist_ok=True)
+    # These numeric IDs are reserved for active VMs, not login accounts.
+    for number in range(60000, 60256):
+        for lookup in (pwd.getpwuid, grp.getgrgid):
+            try:
+                lookup(number)
+            except KeyError:
+                continue
+            raise RuntimeError(f"UID/GID {number} is already assigned; reserve 60000..60255 for sandbox VMs")
 
 
 def remove(identifier, lease):
@@ -84,6 +103,19 @@ def remove(identifier, lease):
             os.kill(int(pid), signal.SIGKILL)
         except ProcessLookupError:
             pass
+    group = CGROUP / identifier
+    if (group / "cgroup.kill").exists():
+        (group / "cgroup.kill").write_text("1")
+    # Wait for the kernel to release the jailed process's mounts and cgroup.
+    for _ in range(100):
+        if not group.exists() or "populated 1" not in (group / "cgroup.events").read_text():
+            break
+        time.sleep(0.01)
+    if group.exists():
+        group.rmdir()
+    jail = JAILS / "firecracker" / identifier
+    if jail.exists():
+        shutil.rmtree(jail)
     run("ip", "netns", "del", namespace, check=False)
     run("ip", "link", "del", "asv" + identifier, check=False)
     if lease:
@@ -115,7 +147,7 @@ def create(identifier, uid):
         run("ip", "netns", "exec", ns, "sysctl", "-q", "-w", "net.ipv4.ip_forward=1", "net.ipv6.conf.all.disable_ipv6=1", "net.ipv6.conf.default.disable_ipv6=1")
         # Firewall is installed before the TAP can carry any guest traffic.
         run("ip", "netns", "exec", ns, "nft", "-f", "-", input=namespace_rules())
-        ip("tuntap", "add", "dev", "tap0", "mode", "tap", "user", str(uid))
+        ip("tuntap", "add", "dev", "tap0", "mode", "tap", "user", str(60000 + slot))
         ip("link", "set", "tap0", "address", "02:fc:00:00:00:02")
         ip("addr", "add", "172.30.0.1/30", "dev", "tap0")
         ip("link", "set", "tap0", "up")
@@ -137,6 +169,23 @@ def main():
     if uid == 0:
         raise ValueError("Run through sudo as the Lima user, not a root login")
     STATE.mkdir(mode=0o700, exist_ok=True)
+    if command == "access":
+        # Firecracker creates sockets as 0755, so inherited ACLs alone cannot
+        # grant the separate controller UID permission to connect.
+        if sys.argv[3:] not in (["api"], ["vsock"]):
+            raise ValueError("Expected api or vsock")
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            lease = json.loads((STATE / identifier).read_text())
+            if lease["uid"] != uid:
+                raise ValueError("Network belongs to a different user")
+            if "directory" in lease:
+                socket = Path(lease["directory"]) / ("api.sock" if sys.argv[3] == "api" else "v.sock")
+                if socket.is_socket():
+                    run("setfacl", "-m", f"u:{uid}:rw", str(socket))
+                    return
+            time.sleep(0.03)
+        raise RuntimeError("Jailed socket did not appear; inspect serial.log")
     with (STATE / "lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         lease_path = STATE / identifier
@@ -155,16 +204,81 @@ def main():
             return
         if command != "run":
             raise ValueError("Unknown command")
-    # Only the namespace entry needs root. Drop privileges and capabilities
-    # before executing the user-owned Firecracker binary.
-    account = pwd.getpwuid(uid)
-    expected = str(Path(account.pw_dir) / ".sandbox/bin/firecracker")
-    args = sys.argv[3:]
-    if len(args) != 5 or args[0] != expected or args[1] != "--api-sock" or args[3] != "--log-path":
-        raise ValueError("Unexpected Firecracker command")
-    os.execvp("ip", ["ip", "netns", "exec", "as-" + identifier,
-        "setpriv", "--reuid", str(uid), "--regid", str(account.pw_gid), "--init-groups",
-        "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs", *args])
+    launch(identifier, lease, sys.argv[3:])
+
+
+def checked_path(raw, parent):
+    """Accept only real paths below this user's sandbox storage, never symlinks."""
+    candidate = Path(raw)
+    if not candidate.is_absolute() or candidate.resolve(strict=True) != candidate:
+        raise ValueError("Expected an existing absolute path without symlinks")
+    if candidate.parent != parent:
+        raise ValueError("Resource is outside the permitted sandbox directory")
+    return candidate
+
+
+def launch(identifier, lease, args):
+    if len(args) != 1:
+        raise ValueError("Expected one launch descriptor")
+    request = json.loads(args[0])
+    account = pwd.getpwuid(lease["uid"])
+    storage = Path(account.pw_dir) / ".sandbox/storage"
+    raw_directory = Path(request["directory"])
+    building = request.get("snapshot") is None
+    parent = storage / ("snapshots" if building else "run")
+    directory = checked_path(str(raw_directory), parent)
+    disk = checked_path(str(directory / "rootfs.ext4"), directory)
+    if directory.stat().st_uid != lease["uid"]:
+        raise ValueError("Run directory belongs to another user")
+    snapshot = None if building else checked_path(request["snapshot"], storage / "snapshots")
+    lease["directory"] = str(directory)
+    pending = STATE / (identifier + ".tmp")
+    pending.write_text(json.dumps(lease))
+    pending.replace(STATE / identifier)
+    vm_uid = 60000 + lease["slot"]
+    jail = JAILS / "firecracker" / identifier / "root"
+    jail.mkdir(parents=True, mode=0o700)
+    # The controller retains access to sockets created by the jailed UID.
+    # Only this execution's directory and disk are writable by that UID.
+    run("setfacl", "-m", f"u:{vm_uid}:rwx,d:u:{lease['uid']}:rwx,d:u:{vm_uid}:rwx", str(directory))
+    run("setfacl", "-m", f"u:{vm_uid}:rw", str(disk))
+    # Mounts exist only in this process's namespace. Killing the VMM removes
+    # them automatically; no privileged bind mounts are left on the host.
+    os.unshare(os.CLONE_NEWNS)
+    run("mount", "--make-rprivate", "/")
+
+    def bind(source, name, readonly=False):
+        target = jail / name
+        if source.is_dir():
+            target.mkdir(parents=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.touch()
+        run("mount", "--bind", str(source), str(target))
+        if readonly:
+            run("mount", "-o", "remount,bind,ro,nosuid,nodev,noexec", str(target))
+
+    bind(directory, "sandbox")
+    if building:
+        bind(BIN / "vmlinux", "kernel", readonly=True)
+    else:
+        for name in ("state", "memory"):
+            source = checked_path(str(snapshot / name), snapshot)
+            run("setfacl", "-m", f"u:{vm_uid}:r", str(source))
+            bind(source, "snapshot/" + name, readonly=True)
+    # Jailer adds filesystem isolation, joins the existing network namespace,
+    # drops to a distinct UID, and enforces cgroup-v2 limits. Firecracker's
+    # default seccomp filters remain enabled.
+    command = [str(BIN / "jailer"), "--id", identifier,
+        "--exec-file", str(BIN / "firecracker"), "--uid", str(vm_uid), "--gid", str(vm_uid),
+        "--chroot-base-dir", str(JAILS), "--netns", "/run/netns/as-" + identifier,
+        "--new-pid-ns", "--cgroup-version", "2", "--parent-cgroup", "agent-sandbox",
+        "--cgroup", "cpu.max=100000 100000", "--cgroup", "memory.max=536870912",
+        "--cgroup", "pids.max=64", "--resource-limit", "no-file=256",
+        "--resource-limit", "fsize=2147483648",
+        "--", "--api-sock", "/sandbox/api.sock", "--log-path", "/sandbox/firecracker.log"]
+    os.execv(command[0], command)
+
 
 
 if __name__ == "__main__":

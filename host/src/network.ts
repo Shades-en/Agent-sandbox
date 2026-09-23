@@ -9,10 +9,11 @@ export interface NetworkHandle {
   id: string;
   hostDevName: string;
   release(): Promise<void>;
+  allowSocket?(kind: "api" | "vsock"): Promise<void>;
 }
 
 // Privileged work is scoped to this VM's namespace and interfaces. The VMM
-// itself runs as the regular user inside that namespace.
+// runs through the official jailer under a separate UID inside that namespace.
 export async function createNetwork(): Promise<NetworkHandle> {
   const id = randomBytes(4).toString("hex");
   try {
@@ -24,6 +25,9 @@ export async function createNetwork(): Promise<NetworkHandle> {
   }
   return {
     id, hostDevName: "tap0",
+    async allowSocket(kind) {
+      await run("sudo", ["-n", NETWORK_HELPER, "access", id, kind], { timeout: 15_000 });
+    },
     async release() {
       await run("sudo", ["-n", NETWORK_HELPER, "delete", id], { timeout: 15_000 });
     },

@@ -35,7 +35,7 @@ export interface ExecEnv {
   firecrackerBin: string;
   openNetwork?: () => Promise<NetworkHandle>;
   copy: (base: string, dest: string) => Promise<void>;
-  spawn: (args: { bin: string; apiSock: string; logPath: string; serialPath: string; network?: NetworkHandle }) => FirecrackerHandle;
+  spawn: (args: { bin: string; apiSock: string; logPath: string; serialPath: string; network?: NetworkHandle; snapshotDirectory?: string; boot?: boolean }) => FirecrackerHandle;
   waitForApi: (apiSock: string, deadline: number) => Promise<void>;
   configure: (apiSock: string, request: BootRequest) => Promise<void>;
   exchange: (vsockPath: string, command: string, timeoutMs: number, timings?: Record<string, number>) => Promise<ExecResponse>;
@@ -68,16 +68,20 @@ function spawnFirecracker(args: {
   logPath: string;
   serialPath: string;
   network?: NetworkHandle;
+  snapshotDirectory?: string;
 }): FirecrackerHandle {
   const serial = fs.openSync(args.serialPath, "a");
   const child: ChildProcess = spawn(
     args.network ? "sudo" : args.bin,
-    args.network ? ["-n", NETWORK_HELPER, "run", args.network.id, args.bin, ...firecrackerArgs(args.apiSock, args.logPath)] : firecrackerArgs(args.apiSock, args.logPath),
+    args.network ? ["-n", NETWORK_HELPER, "run", args.network.id, JSON.stringify({ directory: path.dirname(args.apiSock), snapshot: args.snapshotDirectory })] : firecrackerArgs(args.apiSock, args.logPath),
     { stdio: ["ignore", serial, serial] },
   );
   fs.closeSync(serial);
   const ready = new Promise<void>((resolve, reject) => {
-    child.once("spawn", () => resolve());
+    child.once("spawn", () => {
+      // A jailed VMM uses its own UID; grant the controller socket access.
+      Promise.resolve(args.network?.allowSocket?.("api")).then(resolve, reject);
+    });
     child.once("error", (err) => {
       reject(new Error(`failed to spawn ${args.bin}: ${err.message}`));
     });
@@ -97,12 +101,15 @@ export function defaultEnv(): ExecEnv {
   let snapshotDirectory: string;
   const env: ExecEnv = {
     home,
-    kernelPath: path.join(base, "images", "vmlinux"),
+    kernelPath: "/usr/local/lib/agent-sandbox/vmlinux",
     rootfsBase: path.join(home, "images", "rootfs.ext4"),
-    firecrackerBin: path.join(base, "bin", "firecracker"),
+    firecrackerBin: "/usr/local/lib/agent-sandbox/firecracker",
     copy: copyRootfs,
     openNetwork: createNetwork,
-    spawn: spawnFirecracker,
+    spawn(args) {
+      // Snapshot construction boots a kernel; executions restore cached memory.
+      return spawnFirecracker({ ...args, snapshotDirectory: args.boot ? undefined : snapshotDirectory });
+    },
     waitForApi: waitForSocket,
     async prepare() {
       await assertBtrfsStorage(home);
@@ -110,7 +117,7 @@ export function defaultEnv(): ExecEnv {
       return path.join(snapshotDirectory, "rootfs.ext4");
     },
     async configure(socket, request) {
-      await restoreSnapshot(socket, snapshotDirectory, request);
+      await restoreSnapshot(socket, snapshotDirectory, { ...request, jailed: true });
     },
     exchange: connectAndExchange,
     log(line) {
@@ -163,6 +170,7 @@ export async function execCommand(
       vsockPath,
       network,
     }));
+    await measure("vsock.access", async () => network?.allowSocket?.("vsock"));
     // The guest has resumed. exchange reconnects to its saved vsock listener.
     const response = await env.exchange(vsockPath, command, timeoutSec * 1000, timings);
     return {
