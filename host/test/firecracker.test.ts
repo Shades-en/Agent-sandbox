@@ -1,3 +1,4 @@
+import { BOOT_ARGS } from "../src/constants.js";
 import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
@@ -116,4 +117,12 @@ it("attaches the network before boot with the MAC saved in the snapshot", () => 
     body: { iface_id: "eth0", host_dev_name: "tap0", guest_mac: "02:fc:00:00:00:01" },
   });
   assert.equal(calls.at(-1)?.path, "/actions");
+});
+
+
+it("jailed boot uses only jail-relative resource paths", () => {
+  const calls = bootCalls({ kernelPath: "/host/kernel", rootfsPath: "/host/disk", vsockPath: "/host/vsock", jailed: true });
+  assert.deepEqual(calls.find(c => c.path === "/boot-source")?.body, { kernel_image_path: "/kernel", boot_args: BOOT_ARGS });
+  assert.equal((calls.find(c => c.path === "/drives/rootfs")?.body as { path_on_host: string }).path_on_host, "/sandbox/rootfs.ext4");
+  assert.equal((calls.find(c => c.path === "/vsock")?.body as { uds_path: string }).uds_path, "/sandbox/v.sock");
 });

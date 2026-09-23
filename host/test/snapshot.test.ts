@@ -37,6 +37,18 @@ test("restore loads paused, switches disk, then resumes on a private vsock path"
       ["PATCH", "/drives/rootfs", { drive_id: "rootfs", path_on_host: "/run/disk" }],
       ["PATCH", "/vm", { state: "Resumed" }],
     ]);
+    calls.length = 0;
+    await restoreSnapshot(sock, "/host/saved", {
+      rootfsPath: "/host/run/disk", vsockPath: "/host/run/v.sock", kernelPath: "/unused", jailed: true,
+    });
+    assert.deepEqual(calls, [
+      ["PUT", "/snapshot/load", {
+        snapshot_path: "/snapshot/state", mem_backend: { backend_type: "File", backend_path: "/snapshot/memory" },
+        vsock_override: { uds_path: "/sandbox/v.sock" }, resume_vm: false,
+      }],
+      ["PATCH", "/drives/rootfs", { drive_id: "rootfs", path_on_host: "/sandbox/rootfs.ext4" }],
+      ["PATCH", "/vm", { state: "Resumed" }],
+    ]);
     // A failed disk switch must leave the VM paused; never run on the template.
     rejectDisk = true;
     calls.length = 0;
