@@ -168,8 +168,9 @@ Full host setup installs a root-owned helper at
 `agent-sandbox-network.service` systemd unit. This service reinstalls only the
 project's firewall table and enables forwarding after a restart, without flushing
 Lima's other rules. The controller calls the helper using passwordless sudo
-inside this development Lima VM. The helper enters the namespace, then drops to
-the regular Lima user and removes capabilities before launching Firecracker.
+inside this development Lima VM. The helper prepares a restricted filesystem,
+then the official jailer enters the namespace and launches Firecracker under a
+separate unprivileged UID with cgroup limits.
 API sockets, disk files, and vsock remain accessible through their normal paths.
 Namespaces, interfaces, and their connection-tracking entries are removed on
 completion, error, and timeout. Up to 256 concurrent network allocations are supported.
@@ -336,8 +337,77 @@ is not included in the model's tool result. Logs omit prompts, source code,
 model/tool output, and credentials. Normal stdout still contains the actual
 response, including anything you explicitly ask a program to print.
 
-## What this slice leaves out
+## Jailer: restrict Firecracker on the host
 
-The jailer is a second binary shipped with Firecracker. It starts first, chroots the Firecracker process, drops root, and applies a cgroup. The microVM already walls the guest off from the host. The jailer walls a buggy Firecracker process off from the rest of the host. This slice runs `firecracker` directly.
+The guest VM isolates user code. The **jailer** adds another boundary around the
+Firecracker process on the Linux host. Every real launch, including the initial
+snapshot builder, now uses the matching official Firecracker v1.17.0 jailer.
+The default seccomp filters remain enabled.
+
+Setup installs root-owned `firecracker`, `jailer`, and `vmlinux` under
+`/usr/local/lib/agent-sandbox`. Each active VM gets its own numeric UID/GID from
+60000..60255, an existing private network namespace, a new PID namespace, and a
+restricted filesystem under `/srv/agent-sandbox/firecracker/<id>/root`.
+Those numeric IDs must not belong to login accounts or groups; setup checks this.
+
+Inside that filesystem:
+
+- `/sandbox` exposes only this execution's directory: private disk, sockets, and logs.
+- `/kernel` is a read-only kernel file during the first cold boot.
+- `/snapshot/state` and `/snapshot/memory` are read-only files during restores.
+
+Host directories and credentials are not mounted into the jail. Bind mounts are
+created in a private mount namespace, so they disappear when the process dies.
+The controller retains narrowly granted access to the API and vsock sockets;
+it sends jail-relative paths in the Firecracker API requests. Snapshot format 5
+records `/sandbox/rootfs.ext4`, so loading a snapshot opens the current execution's
+private disk from the beginning, rather than opening the saved template disk.
+Older snapshots are automatically replaced on the next execution.
+
+The jailer configures cgroup v2 limits: one CPU worth of time, 512 MiB of host
+memory for the VMM, and 64 host tasks. The guest still has one vCPU and 256 MiB
+of RAM. These cgroup limits cover the host process and its threads; guest
+processes are not individually counted by the host's `pids.max`. Open file
+descriptors are limited to 256 and each host file to 2 GiB. The latter is a
+per-file limit, not an aggregate disk quota. Network, cgroup, and jail resources
+are removed on completion, launch failure, and command timeout. Run directories
+are retained for debugging as before.
+
+For an existing network-enabled installation, update once from the repository root:
+
+```bash
+pnpm --dir host build
+limactl shell fc -- ./scripts/setup-network.sh
+limactl shell fc -- python3 scripts/test-jailer.py
+```
+
+Full `setup-host.sh` also includes this setup. The first execution builds a new
+jailed snapshot and is slower; later executions restore it. The startup service
+restores firewall rules and enables cgroup controllers after a Lima reboot.
+
+The live jailer test inspects concurrent VMM processes for distinct UIDs,
+filesystem and PID isolation, active seccomp filters, actual cgroup limits,
+read-only snapshot mounts, and resource cleanup. The networking test continues
+to exercise allowed HTTPS, blocked traffic, concurrency, and timeout cleanup.
+
+## Workers and production hosts
+
+A **host** is the Linux machine providing KVM, CPU, memory, and storage. A
+**worker** is the controller service running on that host. One worker can launch
+many guest VMs, subject to host capacity and admission limits. In development,
+`fc` is the host and the CLI performs the worker's execution logic.
+
+A future deployment might have a worker on Linux server A managing guests A1/A2,
+and another on server B managing guests B1/B2. The agent backend would choose a
+worker and submit code through an authenticated internal API; that worker would
+use local Firecracker sockets and vsock to execute it. The guests stay on their
+worker's host. The backend could also run on the same server as a worker.
+
+This repo does not yet implement that HTTP API, distributed scheduling, admission
+control, crash recovery for an abruptly killed controller, or automatic retention
+limits for old run directories. Jailer integration alone is not a complete
+production service.
+
+## What this slice leaves out
 
 A later slice can keep a pool of restored VMs to prepare them before tool calls arrive. This version restores one fresh VM per execution.
